@@ -478,6 +478,7 @@ class _ControllerPageState extends State<ControllerPage> {
 
   // ===== BLUETOOTH =====
   BluetoothDevice? bleDevice;
+  BluetoothCharacteristic? _controlChar; // cache karakteristik supaya tidak discoverServices() tiap kirim perintah
   bool isScanning = false;
   List<ScanResult> scanResults = [];
   bool bleConnected = false;
@@ -486,6 +487,7 @@ class _ControllerPageState extends State<ControllerPage> {
   // Hardware (board decoy PD3.1/QC3.0) mendukung 4 level tegangan
   // tetap secara fisik: 5V / 9V / 12V / 15V. Tidak ada mode kontinu.
   double setVolt = 5.0; // voltase yang sedang aktif/terkirim
+  double chargerWatt = 0.0; // watt maksimum charger, dari field "chargerWatt" firmware
   String ledMode = "off"; // "off" | "static" | "running" | "disco" | "bounce"
   String lastLedEffect = "running"; // efek terakhir dipilih, dipakai saat tombol ON
   String uptime = "00:00:00";
@@ -651,6 +653,7 @@ class _ControllerPageState extends State<ControllerPage> {
       activeCooler = cooler;
       status = "🔴 Offline";
       bleConnected = false;
+      _controlChar = null;
     });
     _lastOnlineAt = null;
     _offlineNotified = false;
@@ -736,11 +739,13 @@ class _ControllerPageState extends State<ControllerPage> {
     final rawPowerGood = data['powerGood'];
     final rawReady = data['ch224aReady'];
     final rawPdStatus = data['pdStatus'];
+    final rawChargerWatt = data['chargerWatt'];
 
     if (rawVoltage is num) setVolt = rawVoltage.toDouble();
     if (rawPowerGood is bool) powerGood = rawPowerGood;
     if (rawReady is bool) ch224aReady = rawReady;
     if (rawPdStatus is String) pdStatus = rawPdStatus;
+    if (rawChargerWatt is num) chargerWatt = rawChargerWatt.toDouble();
     ledMode = data['ledMode'] ?? ledMode;
     uptime = data['uptime'] ?? uptime;
     if (ledMode != "off") lastLedEffect = ledMode;
@@ -908,6 +913,18 @@ class _ControllerPageState extends State<ControllerPage> {
   Future<void> connectBLE(BluetoothDevice device) async {
     try {
       await device.connect();
+      // Minta parameter koneksi BLE latensi-rendah (Android) supaya
+      // notify/write jadi lebih responsif. No-op di iOS (dikontrol OS).
+      try {
+        await device.requestConnectionPriority(
+          connectionPriorityRequest: ConnectionPriority.high,
+        );
+      } catch (_) {}
+      // MTU lebih besar = command JSON muat sekali kirim, tanpa fragmentasi.
+      try {
+        await device.requestMtu(185);
+      } catch (_) {}
+
       setState(() {
         bleDevice = device;
         bleConnected = true;
@@ -917,6 +934,7 @@ class _ControllerPageState extends State<ControllerPage> {
       for (var service in services) {
         for (var characteristic in service.characteristics) {
           if (characteristic.uuid.toString() == "beb5483e-36e1-4688-b7f5-ea07361b26a8") {
+            _controlChar = characteristic; // cache sekali di sini, dipakai ulang untuk semua write
             await characteristic.setNotifyValue(true);
             characteristic.onValueReceived.listen((value) {
               String payload = utf8.decode(value);
@@ -937,11 +955,38 @@ class _ControllerPageState extends State<ControllerPage> {
     } catch (e) {
       setState(() {
         bleConnected = false;
+        _controlChar = null;
         status = "🔴 Offline";
       });
       if (activeCooler != null) {
         HistoryService.recordStatus(coolerId: activeCooler!.id, online: false, voltage: setVolt);
       }
+    }
+  }
+
+  // Satu jalur write terpusat: pakai karakteristik yang sudah di-cache,
+  // dan writeWithoutResponse kalau firmware mendukungnya (lebih cepat,
+  // tidak menunggu ACK balik dari ESP32).
+  Future<bool> _writeControlBLE(Map<String, dynamic> payload) async {
+    if (!bleConnected || bleDevice == null) return false;
+    var ch = _controlChar;
+    if (ch == null) {
+      // Fallback kalau cache belum ada (mis. reconnect race) - discover sekali saja.
+      List<BluetoothService> services = await bleDevice!.discoverServices();
+      for (var service in services) {
+        for (var c in service.characteristics) {
+          if (c.uuid.toString() == "beb5483e-36e1-4688-b7f5-ea07361b26a8") ch = c;
+        }
+      }
+      _controlChar = ch;
+    }
+    if (ch == null) return false;
+    try {
+      final canWriteFast = ch.properties.writeWithoutResponse;
+      await ch.write(utf8.encode(jsonEncode(payload)), withoutResponse: canWriteFast);
+      return true;
+    } catch (e) {
+      return false;
     }
   }
 
@@ -951,18 +996,10 @@ class _ControllerPageState extends State<ControllerPage> {
       _showSnack("⚠️ Belum terhubung ke perangkat Bluetooth");
       return;
     }
-    try {
-      List<BluetoothService> services = await bleDevice!.discoverServices();
-      for (var service in services) {
-        for (var characteristic in service.characteristics) {
-          if (characteristic.uuid.toString() == "beb5483e-36e1-4688-b7f5-ea07361b26a8") {
-            await characteristic.write(utf8.encode(jsonEncode({"voltage": volt})));
-            _showSnack("⏳ Request ${volt.toStringAsFixed(0)}V terkirim, menunggu negosiasi PD...");
-            return;
-          }
-        }
-      }
-    } catch (e) {
+    final ok = await _writeControlBLE({"voltage": volt});
+    if (ok) {
+      _showSnack("⏳ Request ${volt.toStringAsFixed(0)}V terkirim, menunggu negosiasi PD...");
+    } else {
       _showSnack("❌ Gagal mengirim perintah ke perangkat");
     }
   }
@@ -973,20 +1010,12 @@ class _ControllerPageState extends State<ControllerPage> {
       _showSnack("⚠️ Belum terhubung ke perangkat Bluetooth");
       return;
     }
-    try {
-      List<BluetoothService> services = await bleDevice!.discoverServices();
-      for (var service in services) {
-        for (var characteristic in service.characteristics) {
-          if (characteristic.uuid.toString() == "beb5483e-36e1-4688-b7f5-ea07361b26a8") {
-            await characteristic.write(utf8.encode(jsonEncode({"ledMode": mode})));
-            setState(() {
-              ledMode = mode;
-            });
-            return;
-          }
-        }
-      }
-    } catch (e) {
+    final ok = await _writeControlBLE({"ledMode": mode});
+    if (ok) {
+      setState(() {
+        ledMode = mode;
+      });
+    } else {
       _showSnack("❌ Gagal mengirim perintah ke perangkat");
     }
   }
@@ -1267,18 +1296,7 @@ class _ControllerPageState extends State<ControllerPage> {
   }
 
   Future<void> sendBLERaw(Map<String, dynamic> payload) async {
-    if (!bleConnected || bleDevice == null) return;
-    try {
-      List<BluetoothService> services = await bleDevice!.discoverServices();
-      for (var service in services) {
-        for (var characteristic in service.characteristics) {
-          if (characteristic.uuid.toString() == "beb5483e-36e1-4688-b7f5-ea07361b26a8") {
-            await characteristic.write(utf8.encode(jsonEncode(payload)));
-            return;
-          }
-        }
-      }
-    } catch (e) {}
+    await _writeControlBLE(payload);
   }
 
   // ===== DIALOG: SETUP WIFI =====
@@ -2219,6 +2237,10 @@ class _ControllerPageState extends State<ControllerPage> {
       Expanded(child: _metricBox(isDark, Icons.timer_outlined, 'UPTIME', uptime)),
       const SizedBox(width: 7),
       Expanded(child: _metricBox(isDark, Icons.wifi_tethering, 'LINK', connectionMode)),
+    ]),
+    const SizedBox(height: 7),
+    Row(children: [
+      Expanded(child: _metricBox(isDark, Icons.electric_bolt_rounded, 'CHARGER', '${chargerWatt.toStringAsFixed(1)}W')),
     ]),
   ]));
 
