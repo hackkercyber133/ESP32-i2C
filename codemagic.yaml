@@ -1,0 +1,101 @@
+workflows:
+  android-workflow:
+    name: Fan Cooler Android Build
+    max_build_duration: 30
+    environment:
+      flutter: stable
+    scripts:
+      - name: Generate scaffold Flutter (folder android/) kalau belum ada
+        script: |
+          if [ ! -d "android" ]; then
+            echo "Scaffold android/ belum ada, generate otomatis pakai flutter create..."
+            cp pubspec.yaml /tmp/pubspec.yaml.bak
+            cp -r lib /tmp/lib.bak
+            flutter create --platforms=android --org com.coolerapp --project-name app_controller .
+            cp /tmp/pubspec.yaml.bak pubspec.yaml
+            rm -rf lib
+            cp -r /tmp/lib.bak lib
+          else
+            echo "Folder android/ sudah ada, skip generate."
+          fi
+      - name: Set nama aplikasi (app label)
+        script: |
+          python3 - <<'PYEOF'
+          import re
+          path = "android/app/src/main/AndroidManifest.xml"
+          with open(path) as f:
+              content = f.read()
+          content = re.sub(r'android:label="[^"]*"', 'android:label="Mod And TroubleShoot"', content)
+          with open(path, "w") as f:
+              f.write(content)
+          PYEOF
+          grep android:label android/app/src/main/AndroidManifest.xml
+      - name: Tambahkan permission Bluetooth & Lokasi (WAJIB untuk fitur BLE)
+        script: |
+          python3 - <<'PYEOF'
+          import re
+          path = "android/app/src/main/AndroidManifest.xml"
+          with open(path) as f:
+              content = f.read()
+          if "BLUETOOTH_SCAN" not in content:
+              perms = (
+                  '    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />\n'
+                  '    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />\n'
+                  '    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />\n'
+                  '    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n'
+                  '    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />\n'
+                  '    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />\n'
+                  '    <uses-permission android:name="android.permission.INTERNET" />\n'
+              )
+              content = re.sub(r'(<manifest[^>]*>)', r'\1\n' + perms, content, count=1)
+              with open(path, "w") as f:
+                  f.write(content)
+          PYEOF
+          echo "--- Isi permission sekarang: ---"
+          grep "uses-permission" android/app/src/main/AndroidManifest.xml
+      - name: Aktifkan Core Library Desugaring (WAJIB untuk flutter_local_notifications)
+        script: |
+          python3 - <<'PYEOF'
+          import re
+
+          path = "android/app/build.gradle.kts"
+          with open(path) as f:
+              content = f.read()
+
+          # 1) Aktifkan isCoreLibraryDesugaringEnabled di dalam compileOptions
+          if "isCoreLibraryDesugaringEnabled" not in content:
+              content = re.sub(
+                  r'(compileOptions\s*\{)',
+                  r'\1\n        isCoreLibraryDesugaringEnabled = true',
+                  content,
+                  count=1,
+              )
+
+          # 2) Tambahkan dependency desugar_jdk_libs
+          if "desugar_jdk_libs" not in content:
+              if re.search(r'dependencies\s*\{', content):
+                  content = re.sub(
+                      r'(dependencies\s*\{)',
+                      r'\1\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")',
+                      content,
+                      count=1,
+                  )
+              else:
+                  content += (
+                      '\ndependencies {\n'
+                      '    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n'
+                      '}\n'
+                  )
+
+          with open(path, "w") as f:
+              f.write(content)
+          PYEOF
+          echo "--- Isi compileOptions & dependencies sekarang: ---"
+          grep -n "isCoreLibraryDesugaringEnabled\|desugar_jdk_libs" android/app/build.gradle.kts
+      - name: Ambil dependency Flutter
+        script: flutter pub get
+      - name: Build APK
+        script: flutter build apk --release
+    artifacts:
+      - build/**/outputs/**/*.apk
+      - build/**/outputs/**/mapping.txt
