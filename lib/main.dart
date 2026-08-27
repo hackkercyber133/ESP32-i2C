@@ -2310,7 +2310,7 @@ class _ControllerPageState extends State<ControllerPage> {
   Widget _nexusConnectionActions(bool isDark) => Row(children: [
     Expanded(child: OutlinedButton.icon(onPressed: () { if (activeCooler == null) showAddCoolerDialog(); else _connectActiveCooler(); }, icon: Icon(Icons.sync_rounded, color: accentColor), label: Text('REFRESH', style: TextStyle(color: accentColor, fontSize: 10, fontWeight: FontWeight.w900)), style: OutlinedButton.styleFrom(side: BorderSide(color: accentColor.withOpacity(.4)), padding: const EdgeInsets.symmetric(vertical: 14)))),
     const SizedBox(width: 10),
-    Expanded(child: OutlinedButton.icon(onPressed: showWiFiSetupDialog, icon: Icon(Icons.wifi_tethering_rounded, color: accentColor), label: Text('SETUP WIFI', style: TextStyle(color: accentColor, fontSize: 10, fontWeight: FontWeight.w900)), style: OutlinedButton.styleFrom(side: BorderSide(color: accentColor.withOpacity(.4)), padding: const EdgeInsets.symmetric(vertical: 14)))),
+    Expanded(child: OutlinedButton.icon(onPressed: switchToWifiSetup, icon: Icon(Icons.wifi_tethering_rounded, color: accentColor), label: Text('SETUP WIFI', style: TextStyle(color: accentColor, fontSize: 10, fontWeight: FontWeight.w900)), style: OutlinedButton.styleFrom(side: BorderSide(color: accentColor.withOpacity(.4)), padding: const EdgeInsets.symmetric(vertical: 14)))),
   ]);
 
   Widget _nexusSectionTitle(bool isDark, String title, String subtitle) => Row(children: [
