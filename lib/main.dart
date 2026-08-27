@@ -17,6 +17,16 @@ import 'backup_service.dart';
 import 'history_page.dart';
 import 'schedule_page.dart';
 
+// ---- Basic Auth untuk endpoint HTTP ESP32 yang mengubah state ----
+// Harus SAMA PERSIS dengan HTTP_AUTH_USER / HTTP_AUTH_PASS di firmware.ino.
+// Kalau kamu ganti password di firmware, ganti juga di sini.
+const String _esp32AuthUser = "admin01";
+const String _esp32AuthPass = "admin01";
+Map<String, String> esp32AuthHeaders() {
+  final creds = base64Encode(utf8.encode("$_esp32AuthUser:$_esp32AuthPass"));
+  return {"Authorization": "Basic $creds"};
+}
+
 // =======================================================================
 // ===== MODEL: satu "Cooler" yang sudah dipasangkan (paired) dengan HP =====
 // Supaya banyak HP & banyak cooler tidak tumbukan, setiap cooler dikenali
@@ -810,7 +820,7 @@ class _ControllerPageState extends State<ControllerPage> {
     }
     try {
       final response = await http
-          .get(Uri.http(_wifiIp!, "/set", {"voltage": volt.toString()}))
+          .post(Uri.http(_wifiIp!, "/set", {"voltage": volt.toString()}), headers: esp32AuthHeaders())
           .timeout(Duration(seconds: 3));
       if (response.statusCode == 200) {
         try {
@@ -834,7 +844,7 @@ class _ControllerPageState extends State<ControllerPage> {
       return;
     }
     try {
-      await http.get(Uri.http(_wifiIp!, "/set", {"ledMode": mode})).timeout(Duration(seconds: 3));
+      await http.post(Uri.http(_wifiIp!, "/set", {"ledMode": mode}), headers: esp32AuthHeaders()).timeout(Duration(seconds: 3));
       setState(() => ledMode = mode);
     } catch (e) {
       _showSnack("⚠️ Gagal kirim perintah, cek koneksi WiFi");
@@ -848,7 +858,7 @@ class _ControllerPageState extends State<ControllerPage> {
       return;
     }
     try {
-      await http.get(Uri.http(_wifiIp!, "/switch_ble")).timeout(Duration(seconds: 3));
+      await http.post(Uri.http(_wifiIp!, "/switch_ble"), headers: esp32AuthHeaders()).timeout(Duration(seconds: 3));
       _showSnack("🔄 ESP32 sedang pindah ke mode Bluetooth...");
       _stopLocalWifi();
       setState(() {
@@ -1082,7 +1092,7 @@ class _ControllerPageState extends State<ControllerPage> {
       // langsung, jadi rusak kalau ssid/password ada spasi atau karakter
       // spesial seperti & + # %).
       var url = Uri.http("192.168.4.1", "/setwifi", {"ssid": ssid, "password": password});
-      var response = await http.get(url).timeout(Duration(seconds: 8));
+      var response = await http.post(url, headers: esp32AuthHeaders()).timeout(Duration(seconds: 8));
       if (response.statusCode == 200) {
         String? newDeviceId;
         try {
@@ -1279,7 +1289,7 @@ class _ControllerPageState extends State<ControllerPage> {
   void clearEsp32Cache() {
     if (connectionMode == "WiFi") {
       if (_wifiIp != null) {
-        http.get(Uri.http(_wifiIp!, "/set", {"action": "clear_cache"})).timeout(Duration(seconds: 3));
+        http.post(Uri.http(_wifiIp!, "/set", {"action": "clear_cache"}), headers: esp32AuthHeaders()).timeout(Duration(seconds: 3));
         _showSnack("🧹 Perintah bersihkan cache modul ESP32 terkirim");
       } else {
         _showSnack("⚠️ Tidak terhubung ke ESP32, cache tidak bisa dibersihkan");
