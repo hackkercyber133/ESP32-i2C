@@ -1119,6 +1119,26 @@ class _ControllerPageState extends State<ControllerPage> {
         }
         await Future.delayed(Duration(seconds: 5));
         connectLocalWifi();
+        // Firmware sendiri akan coba connect ke WiFi rumah maks. 15 detik,
+        // lalu kalau gagal (SSID/password salah, sinyal lemah, dll) otomatis
+        // restart balik ke mode Bluetooth. Supaya app tidak nyangkut nunggu
+        // WiFi yang sudah menyerah, kita kasih jendela ~25 detik total sejak
+        // kredensial dikirim (5 detik jeda di atas + 20 detik ini) — kalau
+        // masih belum online, asumsikan firmware sudah balik ke BLE, jadi
+        // app ikut balik ke mode Bluetooth otomatis.
+        final coolerIdAtSubmit = id ?? activeCooler?.id;
+        Future.delayed(Duration(seconds: 20), () {
+          if (!mounted) return;
+          if (status != "🟢 Online" && activeCooler?.id == coolerIdAtSubmit && activeCooler?.mode == "WiFi") {
+            _stopLocalWifi();
+            setState(() {
+              activeCooler!.mode = "Bluetooth";
+            });
+            _savePairedCoolers();
+            _showSnack("⚠️ WiFi gagal connect, ESP32 balik ke mode Bluetooth");
+            scanBLE();
+          }
+        });
       } else {
         _showSnack("❌ Gagal terhubung, coba lagi");
       }
