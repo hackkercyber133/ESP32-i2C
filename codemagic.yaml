@@ -94,6 +94,8 @@ workflows:
           grep -n "isCoreLibraryDesugaringEnabled\|desugar_jdk_libs" android/app/build.gradle.kts
       - name: Ambil dependency Flutter
         script: flutter pub get
+      - name: Generate app icon dari assets/icon/app_icon.png
+        script: flutter pub run flutter_launcher_icons
       - name: Build APK
         script: flutter build apk --release
     artifacts:
