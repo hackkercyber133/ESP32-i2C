@@ -22,7 +22,7 @@ String computeDeviceId() {
 
 #define SDA_PIN      5
 #define SCL_PIN      6
-#define PG_PIN       7
+#define PG_PIN       7 
 
 CH224X_I2C CH224X1(Wire, 0x23, PG_PIN); // we use A7 as isPowerGood pin
 
@@ -62,22 +62,9 @@ void handleOnboardBlink() {
 float currentSetVoltage = 5.0;
 unsigned long startMillis = 0;
 unsigned long lastPublish = 0;
-float current = 0;      // arus maksimum charger dalam mA (dibaca dari CH224X1)
-float chargerwatt = 0;  // watt maksimum = currentSetVoltage * (current/1000)
-bool ch224aReady = false;
-bool powerGood = false;
-String pdStatus = "CH224A_NOT_READY";
-
-// ===== THROTTLE POLLING I2C KE CH224X =====
-// Sebelumnya firmware membaca I2C (getCurrentProfile + hasProtocol) di SETIAP
-// iterasi loop() DAN di dalam critical section bersama BLE - ini menahan bus
-// I2C dan mem-block interrupt tiap ~5ms, yang bikin BLE stack & respons app
-// jadi lambat/patah-patah. Sekarang I2C dipoll berkala di luar critical section.
-#define CH224_POLL_INTERVAL_MS 150
-unsigned long lastCh224Poll = 0;
-// Supaya auto-request 20V (saat PD baru terdeteksi) cuma jalan SEKALI, bukan
-// tiap loop menimpa balik pilihan voltase manual dari app ke 20V terus-menerus.
-bool pdAutoRequested = false;
+float current = 0;
+float chargerwatt = 0;
+bool pgood = 0;
 
 Preferences prefs;
 String netMode;
@@ -90,6 +77,19 @@ bool configApActive = false;
 #define AP_PASS "12345678"
 
 WebServer server(80);
+
+// ---- Basic Auth untuk endpoint HTTP yang mengubah state ----
+// GANTI password ini sebelum dipakai di luar jaringan yang kamu percaya!
+#define HTTP_AUTH_USER "admin01"
+#define HTTP_AUTH_PASS "admin01"
+
+bool checkHttpAuth() {
+  if (!server.authenticate(HTTP_AUTH_USER, HTTP_AUTH_PASS)) {
+    server.requestAuthentication();
+    return false;
+  }
+  return true;
+}
 WiFiUDP udp;
 #define UDP_BEACON_PORT 47269
 unsigned long lastBeacon = 0;
@@ -106,19 +106,23 @@ char bleCommandBuf[129] = {0};
 volatile uint16_t bleCommandLen = 0;
 
 class MyServerCallbacks : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer* srv, NimBLEConnInfo& connInfo) override {
+  void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
     deviceConnected = true;
     Serial.println("BLE: Terhubung ke App!");
-    // Minta interval koneksi BLE lebih rapat (7.5-15ms) begitu app connect,
-    // supaya notify status & write command lebih cepat sampai (default Android
-    // sering minta interval lebih longgar ~30-50ms). Param dalam unit 1.25ms.
-    srv->updateConnParams(connInfo.getConnHandle(), 6, 12, 0, 400);
   }
 
-  void onDisconnect(NimBLEServer* srv, NimBLEConnInfo& connInfo, int reason) override {
+  void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
     deviceConnected = false;
     Serial.println("BLE: Terputus, me-restart advertising...");
     NimBLEDevice::getAdvertising()->start();
+  }
+
+  void onAuthenticationComplete(NimBLEConnInfo& connInfo) override {
+    if (connInfo.isEncrypted()) {
+      Serial.println("BLE: Koneksi terenkripsi & ter-bonding.");
+    } else {
+      Serial.println("BLE: Autentikasi gagal / tidak terenkripsi.");
+    }
   }
 };
 
@@ -138,24 +142,21 @@ class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
-bool applyVoltage(float volt) {
+void applyVoltage(float volt) {
   if (volt >= 13.5) volt = 15.0;
   else if (volt >= 10.5) volt = 12.0;
   else if (volt >= 7.0) volt = 9.0;
   else volt = 5.0;
-
-  uint8_t code;
-  if (volt == 9.0) code = 1;
-  else if (volt == 12.0) code = 2;
-  else if (volt == 15.0) code = 3;
-  else code = 0;
-
-  CH224X1.setVoltage(code);
+  if (volt == 9.0) {
+    CH224X1.setVoltage(1);
+  } else if (volt == 12.0) {
+    CH224X1.setVoltage(2);
+  } else if (volt == 15.0) {
+    CH224X1.setVoltage(3);
+  } else{
+    CH224X1.setVoltage(0);
+  }
   currentSetVoltage = volt;
-  // Pilihan manual dari app menang - jangan biarkan auto-negotiate PD di
-  // pollCH224X() menimpanya balik ke 20V.
-  pdAutoRequested = true;
-  return true;
 }
 
 uint32_t wheelColor(byte pos) {
@@ -227,33 +228,6 @@ void handleLedAnimation() {
   }
 }
 
-// Baca status decoy CH224X (arus maksimum charger, power-good, protokol).
-// PENTING: dipanggil dengan throttle (lihat CH224_POLL_INTERVAL_MS) dan SELALU
-// di luar critical section - transaksi I2C bisa kena clock-stretch/lambat, dan
-// menjalankannya di dalam critical section (seperti kode lama) akan mem-block
-// interrupt sehingga BLE/WiFi ikut macet.
-void pollCH224X() {
-  current = CH224X1.getCurrentProfile(); // mA
-  chargerwatt = (current / 1000.0) * currentSetVoltage;
-  powerGood = CH224X1.isPowerGood();
-  pdStatus = powerGood ? "PD_NEGOTIATED" : "PD_WAITING";
-
-  // Auto-request 20V HANYA sekali, saat PD pertama kali terdeteksi dan user
-  // belum pernah memilih voltase manual sama sekali (pdAutoRequested masih
-  // false sejak boot). Kode lama memanggil setVoltage(4) di SETIAP loop()
-  // selama PD terdeteksi - itu terus-menerus menimpa balik pilihan voltase
-  // manual dari app (5/9/12/15V) ke 20V setiap ~5ms, sehingga permintaan
-  // voltase dari app terasa tidak direspons / balik sendiri. Sekarang cukup
-  // sekali di awal saja, dan begitu applyVoltage() pernah dipanggil (dari app),
-  // auto-request ini tidak akan menimpa lagi.
-  if (!pdAutoRequested && CH224X1.hasProtocol(CH224X_I2C::PROTOCOL_PD)) {
-    CH224X1.setVoltage(4); // request 20V profile
-    currentSetVoltage = 20.0;
-    pdAutoRequested = true;
-    Serial.println("PD terdeteksi, request awal 20V...");
-  }
-}
-
 String buildStatusJson() {
   unsigned long runtime = millis() - startMillis;
   long s = runtime / 1000, m = s / 60, h = m / 60;
@@ -262,13 +236,10 @@ String buildStatusJson() {
   JsonDocument doc;
   doc["deviceId"] = deviceId;
   doc["setVoltage"] = currentSetVoltage;
-  doc["requestedVoltage"] = currentSetVoltage;
   doc["ledMode"] = ledMode;
   doc["uptime"] = uptime;
-  doc["chargerWatt"] = chargerwatt;
-  doc["powerGood"] = powerGood;
-  doc["ch224aReady"] = ch224aReady;
-  doc["pdStatus"] = pdStatus;
+  doc["chargerWatt"] = chargerwatt; 
+  doc["powerGood"] = pgood;
   String jsonStr;
   serializeJson(doc, jsonStr);
   return jsonStr;
@@ -317,6 +288,7 @@ void handleScanWifi() {
 }
 
 void handleSetWifi() {
+  if (!checkHttpAuth()) return;
   if (!server.hasArg("ssid") || !server.hasArg("password")) {
     server.send(400, "text/plain", "missing ssid/password");
     return;
@@ -342,6 +314,7 @@ void handleStatusHttp() {
 }
 
 void handleSetCmd() {
+  if (!checkHttpAuth()) return;
   JsonDocument doc;
   if (server.hasArg("voltage")) doc["voltage"] = server.arg("voltage").toFloat();
   if (server.hasArg("ledMode")) doc["ledMode"] = server.arg("ledMode");
@@ -349,13 +322,11 @@ void handleSetCmd() {
   String cmd;
   serializeJson(doc, cmd);
   processCommandJson(cmd);
-  // Langsung balikin status TERBARU (bukan cuma "OK") supaya app WiFi tidak
-  // perlu menunggu polling /status berikutnya (sebelumnya jeda sampai 3 detik)
-  // untuk tahu hasil perintahnya.
-  server.send(200, "application/json", buildStatusJson());
+  server.send(200, "text/plain", "OK");
 }
 
 void handleSwitchBle() {
+  if (!checkHttpAuth()) return;
   server.send(200, "text/plain", "OK");
   prefs.putString("netMode", "ble");
   Serial.println("Pindah ke mode Bluetooth, restart...");
@@ -364,11 +335,11 @@ void handleSwitchBle() {
 }
 
 void registerHttpHandlers() {
-  server.on("/scanwifi", handleScanWifi);
-  server.on("/setwifi", handleSetWifi);
-  server.on("/status", handleStatusHttp);
-  server.on("/set", handleSetCmd);
-  server.on("/switch_ble", handleSwitchBle);
+  server.on("/scanwifi", HTTP_GET, handleScanWifi);
+  server.on("/setwifi", HTTP_POST, handleSetWifi);
+  server.on("/status", HTTP_GET, handleStatusHttp);
+  server.on("/set", HTTP_POST, handleSetCmd);
+  server.on("/switch_ble", HTTP_POST, handleSwitchBle);
 }
 
 void startConfigAP() {
@@ -419,6 +390,12 @@ void startBleMode() {
 
   NimBLEDevice::init(bleName.c_str());
 
+  // ---- Bonding "Just Works": koneksi otomatis terenkripsi tanpa PIN ----
+  // bonding=true, MITM=false (karena Just Works, tidak ada PIN untuk dicocokkan),
+  // Secure Connections=true (pakai algoritma enkripsi modern BLE 4.2+/5.0)
+  NimBLEDevice::setSecurityAuth(true, false, true);
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+
   #ifdef ESP_PWR_LVL_P9
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   #else
@@ -432,9 +409,8 @@ void startBleMode() {
 
   pCharacteristic = pService->createCharacteristic(
     CHARACTERISTIC_UUID,
-    NIMBLE_PROPERTY::READ |
-    NIMBLE_PROPERTY::WRITE |
-    NIMBLE_PROPERTY::WRITE_NR |   // izinkan write-without-response dari app -> lebih cepat, tidak nunggu ACK
+    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC |
+    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC |
     NIMBLE_PROPERTY::NOTIFY
   );
   pCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
@@ -443,10 +419,6 @@ void startBleMode() {
   NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setAppearance(0x0000);
-
-  // Interval advertising lebih rapat -> app menemukan & connect ke device lebih cepat saat scan.
-  pAdvertising->setMinInterval(32); // 32 * 0.625ms = 20ms
-  pAdvertising->setMaxInterval(48); // 48 * 0.625ms = 30ms
 
   NimBLEAdvertisementData scanResponseData;
   scanResponseData.setName(bleName.c_str());
@@ -470,28 +442,21 @@ void handleBleAction(const String& action) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-
   Wire.begin(SDA_PIN, SCL_PIN);
-  // Fast Mode I2C (400kHz, naik dari default 100kHz) supaya tiap transaksi
-  // ke CH224X (setVoltage/getCurrentProfile/isPowerGood/hasProtocol) selesai
-  // lebih cepat. CH224A/Q mendukung sampai 400kHz.
-  Wire.setClock(400000);
-
   deviceId = computeDeviceId();
   bleName = "ESP32-Cooler-" + deviceId;
 
   pinMode(PIN_ONBOARD_LED, OUTPUT);
   onboardLedWrite(false);
 
-  ch224aReady = CH224X1.begin();
-  if (!ch224aReady) {
-    Serial.println("CH224 not responding! Melanjutkan tanpa kontrol PD (WiFi/BLE tetap aktif).");
-    pdStatus = "CH224A_NOT_READY";
-  } else {
-    CH224X1.setVoltage(0); // mulai aman di 5V
-    currentSetVoltage = 5.0;
-    pollCH224X(); // baca status awal sekali supaya JSON pertama tidak kosong
+  if (!CH224X1.begin()) {
+    Serial.println("CH224 not responding!");
+    while (1);
   }
+
+  CH224X1.setVoltage(0);
+  // current = CH224X1.getCurrentProfile() / 1000.0; // PD lets us query max current
+
 
   strip.begin();
   strip.setBrightness(80);
@@ -520,11 +485,12 @@ void setup() {
 }
 
 void loop() {
-  // ---- 1. Ambil command BLE pending. Critical section DIPERSEMPIT supaya
-  // cuma menyalin buffer kecil (tanpa I2C/tanpa kerja berat di dalamnya) -
-  // ini kunci utama supaya BLE stack tidak pernah ketahan lama. ----
   char cmdBuf[129] = {0};
   portENTER_CRITICAL(&bleMux);
+
+
+
+
   if (bleWritePending) {
     memcpy(cmdBuf, bleCommandBuf, bleCommandLen);
     cmdBuf[bleCommandLen] = '\0';
@@ -535,21 +501,14 @@ void loop() {
   portEXIT_CRITICAL(&bleMux);
   String cmd = String(cmdBuf);
 
-  bool commandHandled = false;
+  
   if (cmd.length() > 0) {
     processCommandJson(cmd);
-    commandHandled = true;
 
     JsonDocument doc;
     if (!deserializeJson(doc, cmd) && doc["action"].is<const char*>()) {
       handleBleAction(doc["action"].as<String>());
     }
-  }
-
-  // ---- 2. Poll I2C ke CH224X di luar critical section & throttled ----
-  if (ch224aReady && millis() - lastCh224Poll >= CH224_POLL_INTERVAL_MS) {
-    lastCh224Poll = millis();
-    pollCH224X();
   }
 
   if (configApActive || wifiControlActive) {
@@ -564,10 +523,29 @@ void loop() {
   handleOnboardBlink();
   handleLedAnimation();
 
-  // Begitu ada command yang baru diproses, langsung kirim status terbaru
-  // (jangan tunggu interval publish berikutnya) supaya app dapat konfirmasi
-  // hasil perintah secepat mungkin lewat notify BLE.
-  if (commandHandled || millis() - lastPublish > 200) {
+  // Baca status CH224X (I2C) & cetak debug, DI-THROTTLE — sebelumnya blok ini
+  // jalan setiap iterasi loop() tanpa jeda sama sekali (2x transaksi I2C +
+  // 4x Serial.print per loop), yang bikin loop() jadi lambat dan menunda
+  // pemrosesan command BLE berikutnya. Sekarang dibatasi tiap 200ms saja,
+  // dan dijalankan SEBELUM publishStatusBLE() supaya notify ke app bawa
+  // data terbaru, bukan data basi dari iterasi sebelumnya.
+  static unsigned long lastCh224Read = 0;
+  if (millis() - lastCh224Read > 200) {
+    lastCh224Read = millis();
+    pgood = CH224X1.isPowerGood();
+    current = CH224X1.getCurrentProfile() / 1000.0; // PD lets us query max current
+    chargerwatt = current * currentSetVoltage;
+    Serial.print("Maximum current : ");
+    Serial.print(current, 0);
+    Serial.println(" A)");
+    Serial.print("Available power : ");
+    Serial.print(chargerwatt);
+    Serial.println(" W");
+    Serial.print("power good : ");
+    Serial.println(pgood);
+  }
+
+  if (millis() - lastPublish > 300) {
     publishStatusBLE();
     lastPublish = millis();
   }
