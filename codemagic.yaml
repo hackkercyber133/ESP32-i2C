@@ -92,12 +92,67 @@ workflows:
           PYEOF
           echo "--- Isi compileOptions & dependencies sekarang: ---"
           grep -n "isCoreLibraryDesugaringEnabled\|desugar_jdk_libs" android/app/build.gradle.kts
+      - name: Aktifkan minify + R8 shrinking (proteksi anti-bongkar sisi Android)
+        script: |
+          python3 - <<'PYEOF'
+          import re
+
+          path = "android/app/build.gradle.kts"
+          with open(path) as f:
+              content = f.read()
+
+          # 1) Sisipkan blok buildTypes.release kalau belum ada
+          if "isMinifyEnabled" not in content:
+              release_block = (
+                  '    buildTypes {\n'
+                  '        release {\n'
+                  '            isMinifyEnabled = true\n'
+                  '            isShrinkResources = true\n'
+                  '            proguardFiles(\n'
+                  '                getDefaultProguardFile("proguard-android-optimize.txt"),\n'
+                  '                "proguard-rules.pro"\n'
+                  '            )\n'
+                  '        }\n'
+                  '    }\n'
+              )
+              # taruh di dalam blok android { ... } paling akhir sebelum penutup
+              content = re.sub(
+                  r'(android\s*\{)',
+                  r'\1\n' + release_block,
+                  content,
+                  count=1,
+              )
+
+          with open(path, "w") as f:
+              f.write(content)
+          PYEOF
+          echo "--- buildTypes sekarang: ---"
+          grep -n "isMinifyEnabled\|isShrinkResources\|proguardFiles" android/app/build.gradle.kts
+      - name: Tulis proguard-rules.pro
+        script: |
+          cat > android/app/proguard-rules.pro <<'EOF'
+          # Flutter engine & plugin embedding wajib di-keep
+          -keep class io.flutter.app.** { *; }
+          -keep class io.flutter.plugin.**  { *; }
+          -keep class io.flutter.util.**  { *; }
+          -keep class io.flutter.view.**  { *; }
+          -keep class io.flutter.**  { *; }
+          -keep class io.flutter.plugins.**  { *; }
+          -dontwarn io.flutter.embedding.**
+
+          # flutter_blue_plus (BLE) butuh reflection, jangan diacak namanya
+          -keep class com.lib.flutter_blue_plus.** { *; }
+
+          # flutter_local_notifications butuh keep juga
+          -keep class com.dexterous.** { *; }
+          EOF
+          echo "--- proguard-rules.pro dibuat ---"
       - name: Ambil dependency Flutter
         script: flutter pub get
-      - name: Generate app icon dari assets/icon/app_icon.png
-        script: flutter pub run flutter_launcher_icons
-      - name: Build APK
-        script: flutter build apk --release
+      - name: Build APK (obfuscated + minified)
+        script: |
+          flutter build apk --release --obfuscate --split-debug-info=build/debug-info
     artifacts:
       - build/**/outputs/**/*.apk
       - build/**/outputs/**/mapping.txt
+      - build/debug-info/**
