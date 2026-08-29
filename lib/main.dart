@@ -21,9 +21,12 @@ import 'schedule_page.dart';
 // Harus SAMA PERSIS dengan HTTP_AUTH_USER / HTTP_AUTH_PASS di firmware.ino.
 // Kalau kamu ganti password di firmware, ganti juga di sini.
 const String _esp32AuthUser = "admin01";
-const String _esp32AuthPass = "admin01";
-Map<String, String> esp32AuthHeaders() {
-  final creds = base64Encode(utf8.encode("$_esp32AuthUser:$_esp32AuthPass"));
+// TIDAK ADA password tetap di sini lagi — tiap device kasih password
+// unik sendiri lewat BLE (yang sudah terenkripsi+bonding), disimpan per
+// cooler di Cooler.httpAuthPass. Lihat esp32AuthHeaders(cooler) di bawah.
+Map<String, String> esp32AuthHeaders(Cooler? cooler) {
+  final pass = cooler?.httpAuthPass ?? "";
+  final creds = base64Encode(utf8.encode("$_esp32AuthUser:$pass"));
   return {"Authorization": "Basic $creds"};
 }
 
@@ -39,11 +42,12 @@ class Cooler {
   String mode; // "WiFi" (HTTP lokal) atau "Bluetooth" (BLE)
   String? bleRemoteId; // MAC BLE, hanya diisi kalau mode == Bluetooth
   String? lastIp; // IP terakhir yang diketahui di jaringan lokal, hanya kalau mode == WiFi
+  String? httpAuthPass; // password HTTP unik per-device, diterima lewat BLE terenkripsi
 
-  Cooler({required this.id, required this.nickname, required this.mode, this.bleRemoteId, this.lastIp});
+  Cooler({required this.id, required this.nickname, required this.mode, this.bleRemoteId, this.lastIp, this.httpAuthPass});
 
   Map<String, dynamic> toJson() =>
-      {"id": id, "nickname": nickname, "mode": mode, "bleRemoteId": bleRemoteId, "lastIp": lastIp};
+      {"id": id, "nickname": nickname, "mode": mode, "bleRemoteId": bleRemoteId, "lastIp": lastIp, "httpAuthPass": httpAuthPass};
 
   factory Cooler.fromJson(Map<String, dynamic> j) => Cooler(
         id: j["id"],
@@ -51,6 +55,7 @@ class Cooler {
         mode: j["mode"],
         bleRemoteId: j["bleRemoteId"],
         lastIp: j["lastIp"],
+        httpAuthPass: j["httpAuthPass"],
       );
 }
 
@@ -759,6 +764,13 @@ class _ControllerPageState extends State<ControllerPage> {
     ledMode = data['ledMode'] ?? ledMode;
     uptime = data['uptime'] ?? uptime;
     if (ledMode != "off") lastLedEffect = ledMode;
+
+    final rawAuthPass = data['httpAuthPass'];
+    if (rawAuthPass is String && rawAuthPass.isNotEmpty && activeCooler != null &&
+        activeCooler!.httpAuthPass != rawAuthPass) {
+      activeCooler!.httpAuthPass = rawAuthPass;
+      _savePairedCoolers();
+    }
   }
 
   String get _pdStatusLabel {
@@ -820,7 +832,7 @@ class _ControllerPageState extends State<ControllerPage> {
     }
     try {
       final response = await http
-          .post(Uri.http(_wifiIp!, "/set", {"voltage": volt.toString()}), headers: esp32AuthHeaders())
+          .post(Uri.http(_wifiIp!, "/set", {"voltage": volt.toString()}), headers: esp32AuthHeaders(activeCooler))
           .timeout(Duration(seconds: 3));
       if (response.statusCode == 200) {
         try {
@@ -844,7 +856,7 @@ class _ControllerPageState extends State<ControllerPage> {
       return;
     }
     try {
-      await http.post(Uri.http(_wifiIp!, "/set", {"ledMode": mode}), headers: esp32AuthHeaders()).timeout(Duration(seconds: 3));
+      await http.post(Uri.http(_wifiIp!, "/set", {"ledMode": mode}), headers: esp32AuthHeaders(activeCooler)).timeout(Duration(seconds: 3));
       setState(() => ledMode = mode);
     } catch (e) {
       _showSnack("⚠️ Gagal kirim perintah, cek koneksi WiFi");
@@ -858,7 +870,7 @@ class _ControllerPageState extends State<ControllerPage> {
       return;
     }
     try {
-      await http.post(Uri.http(_wifiIp!, "/switch_ble"), headers: esp32AuthHeaders()).timeout(Duration(seconds: 3));
+      await http.post(Uri.http(_wifiIp!, "/switch_ble"), headers: esp32AuthHeaders(activeCooler)).timeout(Duration(seconds: 3));
       _showSnack("🔄 ESP32 sedang pindah ke mode Bluetooth...");
       _stopLocalWifi();
       setState(() {
@@ -931,8 +943,10 @@ class _ControllerPageState extends State<ControllerPage> {
         );
       } catch (_) {}
       // MTU lebih besar = command JSON muat sekali kirim, tanpa fragmentasi.
+      // Dinaikkan dari 185 ke 247 (maksimum yang didukung NimBLE default) —
+      // JSON status sekarang lebih panjang sejak ada field httpAuthPass.
       try {
-        await device.requestMtu(185);
+        await device.requestMtu(247);
       } catch (_) {}
 
       setState(() {
@@ -957,7 +971,9 @@ class _ControllerPageState extends State<ControllerPage> {
                 if (activeCooler != null) {
                   HistoryService.recordStatus(coolerId: activeCooler!.id, online: true, voltage: setVolt);
                 }
-              } catch (e) {}
+              } catch (e) {
+                debugPrint("BLE status parse gagal: $e | payload: $payload");
+              }
             });
           }
         }
@@ -1086,13 +1102,17 @@ class _ControllerPageState extends State<ControllerPage> {
   }
 
   Future<void> connectWiFi(String ssid, String password) async {
+    if (activeCooler?.httpAuthPass == null) {
+      _showSnack("⏳ Menunggu data device dari Bluetooth, coba lagi sebentar...");
+      return;
+    }
     try {
       // Pakai Uri.http(...) dengan Map query parameters supaya ssid/password
       // otomatis di-encode dengan benar (sebelumnya string mentah disambung
       // langsung, jadi rusak kalau ssid/password ada spasi atau karakter
       // spesial seperti & + # %).
       var url = Uri.http("192.168.4.1", "/setwifi", {"ssid": ssid, "password": password});
-      var response = await http.post(url, headers: esp32AuthHeaders()).timeout(Duration(seconds: 8));
+      var response = await http.post(url, headers: esp32AuthHeaders(activeCooler)).timeout(Duration(seconds: 8));
       if (response.statusCode == 200) {
         String? newDeviceId;
         try {
@@ -1309,7 +1329,7 @@ class _ControllerPageState extends State<ControllerPage> {
   void clearEsp32Cache() {
     if (connectionMode == "WiFi") {
       if (_wifiIp != null) {
-        http.post(Uri.http(_wifiIp!, "/set", {"action": "clear_cache"}), headers: esp32AuthHeaders()).timeout(Duration(seconds: 3));
+        http.post(Uri.http(_wifiIp!, "/set", {"action": "clear_cache"}), headers: esp32AuthHeaders(activeCooler)).timeout(Duration(seconds: 3));
         _showSnack("🧹 Perintah bersihkan cache modul ESP32 terkirim");
       } else {
         _showSnack("⚠️ Tidak terhubung ke ESP32, cache tidak bisa dibersihkan");
