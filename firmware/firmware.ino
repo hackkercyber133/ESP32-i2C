@@ -8,10 +8,12 @@
 #include <ArduinoJson.h>
 
 #include <Wire.h>
+#include <esp_random.h>
 #include <CH224X_I2C.h>
 
 String deviceId;
 String bleName;
+bool deviceConnected = false;
 
 String computeDeviceId() {
   uint64_t mac = ESP.getEfuseMac();
@@ -22,9 +24,9 @@ String computeDeviceId() {
 
 #define SDA_PIN      5
 #define SCL_PIN      6
-#define PG_PIN       7 
+#define PG_PIN       7
 
-CH224X_I2C CH224X1(Wire, 0x23, PG_PIN); // we use A7 as isPowerGood pin
+CH224X_I2C CH224X1(Wire, 0x23, PG_PIN);
 
 #define PIN_LED_DATA 4
 #define NUM_LEDS 30
@@ -38,24 +40,48 @@ int bounceDir = 1;
 
 #define PIN_ONBOARD_LED 8
 #define ONBOARD_LED_ACTIVE_LOW true
-bool onboardBlinkActive = false;
-unsigned long onboardBlinkStart = 0;
-const unsigned long ONBOARD_BLINK_MS = 150;
 
 void onboardLedWrite(bool on) {
   digitalWrite(PIN_ONBOARD_LED, (ONBOARD_LED_ACTIVE_LOW ? !on : on) ? LOW : HIGH);
 }
 
-void triggerOnboardBlink() {
-  onboardBlinkActive = true;
-  onboardBlinkStart = millis();
-  onboardLedWrite(true);
+bool cmdBlinkActive = false;
+unsigned long cmdBlinkStart = 0;
+const unsigned long CMD_BLINK_MS = 150;
+
+unsigned long lastAppContact = 0;
+bool statusBlinkOn = false;
+unsigned long lastStatusBlinkToggle = 0;
+const unsigned long STATUS_BLINK_INTERVAL_MS = 500;
+const unsigned long APP_CONTACT_TIMEOUT_MS = 5000;
+
+void triggerCmdBlink() {
+  cmdBlinkActive = true;
+  cmdBlinkStart = millis();
 }
 
-void handleOnboardBlink() {
-  if (onboardBlinkActive && millis() - onboardBlinkStart >= ONBOARD_BLINK_MS) {
-    onboardLedWrite(false);
-    onboardBlinkActive = false;
+bool isAppConnected() {
+  return deviceConnected || (millis() - lastAppContact < APP_CONTACT_TIMEOUT_MS);
+}
+
+void handleStatusLed() {
+  if (isAppConnected()) {
+    if (cmdBlinkActive) {
+      if (millis() - cmdBlinkStart < CMD_BLINK_MS) {
+        onboardLedWrite(true);
+      } else {
+        cmdBlinkActive = false;
+        onboardLedWrite(false);
+      }
+    } else {
+      onboardLedWrite(false);
+    }
+  } else {
+    if (millis() - lastStatusBlinkToggle >= STATUS_BLINK_INTERVAL_MS) {
+      lastStatusBlinkToggle = millis();
+      statusBlinkOn = !statusBlinkOn;
+    }
+    onboardLedWrite(statusBlinkOn);
   }
 }
 
@@ -65,6 +91,7 @@ unsigned long lastPublish = 0;
 float current = 0;
 float chargerwatt = 0;
 bool pgood = 0;
+bool ch224aReady = false;
 
 Preferences prefs;
 String netMode;
@@ -78,13 +105,28 @@ bool configApActive = false;
 
 WebServer server(80);
 
-// ---- Basic Auth untuk endpoint HTTP yang mengubah state ----
-// GANTI password ini sebelum dipakai di luar jaringan yang kamu percaya!
 #define HTTP_AUTH_USER "admin01"
-#define HTTP_AUTH_PASS "admin01"
+String httpAuthPass;
+
+String loadOrCreateHttpAuthPass() {
+  String p = prefs.getString("httpAuthPass", "");
+  if (p.length() == 0) {
+    const char charset[] = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    char buf[13];
+    for (int i = 0; i < 12; i++) {
+      uint32_t r = esp_random();
+      buf[i] = charset[r % (sizeof(charset) - 1)];
+    }
+    buf[12] = '\0';
+    p = String(buf);
+    prefs.putString("httpAuthPass", p);
+    Serial.println("Password HTTP unik dibuat untuk device ini.");
+  }
+  return p;
+}
 
 bool checkHttpAuth() {
-  if (!server.authenticate(HTTP_AUTH_USER, HTTP_AUTH_PASS)) {
+  if (!server.authenticate(HTTP_AUTH_USER, httpAuthPass.c_str())) {
     server.requestAuthentication();
     return false;
   }
@@ -101,7 +143,6 @@ NimBLEServer* pServer = nullptr;
 NimBLECharacteristic* pCharacteristic = nullptr;
 volatile bool bleWritePending = false;
 portMUX_TYPE bleMux = portMUX_INITIALIZER_UNLOCKED;
-bool deviceConnected = false;
 char bleCommandBuf[129] = {0};
 volatile uint16_t bleCommandLen = 0;
 
@@ -153,7 +194,7 @@ void applyVoltage(float volt) {
     CH224X1.setVoltage(2);
   } else if (volt == 15.0) {
     CH224X1.setVoltage(3);
-  } else{
+  } else {
     CH224X1.setVoltage(0);
   }
   currentSetVoltage = volt;
@@ -228,7 +269,7 @@ void handleLedAnimation() {
   }
 }
 
-String buildStatusJson() {
+String buildStatusJson(bool includeSecret) {
   unsigned long runtime = millis() - startMillis;
   long s = runtime / 1000, m = s / 60, h = m / 60;
   String uptime = String(h) + ":" + String(m % 60) + ":" + String(s % 60);
@@ -238,8 +279,13 @@ String buildStatusJson() {
   doc["setVoltage"] = currentSetVoltage;
   doc["ledMode"] = ledMode;
   doc["uptime"] = uptime;
-  doc["chargerWatt"] = chargerwatt; 
+  doc["chargerWatt"] = chargerwatt;
   doc["powerGood"] = pgood;
+  doc["ch224aReady"] = ch224aReady;
+  // httpAuthPass HANYA disertakan lewat jalur BLE (terenkripsi+bonding).
+  // JANGAN pernah true di jalur HTTP /status — endpoint itu tanpa auth
+  // dan bisa diakses siapa saja di jaringan WiFi yang sama.
+  if (includeSecret) doc["httpAuthPass"] = httpAuthPass;
   String jsonStr;
   serializeJson(doc, jsonStr);
   return jsonStr;
@@ -247,7 +293,7 @@ String buildStatusJson() {
 
 void publishStatusBLE() {
   if (deviceConnected && pCharacteristic != nullptr) {
-    String jsonStr = buildStatusJson();
+    String jsonStr = buildStatusJson(true);
     pCharacteristic->setValue(jsonStr);
     pCharacteristic->notify();
   }
@@ -258,9 +304,12 @@ void processCommandJson(const String& cmd) {
   if (deserializeJson(doc, cmd)) return;
   if (doc["voltage"].is<float>()) {
     applyVoltage(doc["voltage"]);
-    triggerOnboardBlink();
+    triggerCmdBlink();
   }
-  if (doc["ledMode"].is<const char*>()) applyLedMode(doc["ledMode"].as<String>());
+  if (doc["ledMode"].is<const char*>()) {
+    applyLedMode(doc["ledMode"].as<String>());
+    triggerCmdBlink();
+  }
 }
 
 void handleScanWifi() {
@@ -310,11 +359,13 @@ void handleSetWifi() {
 }
 
 void handleStatusHttp() {
-  server.send(200, "application/json", buildStatusJson());
+  lastAppContact = millis();
+  server.send(200, "application/json", buildStatusJson(false));
 }
 
 void handleSetCmd() {
   if (!checkHttpAuth()) return;
+  lastAppContact = millis();
   JsonDocument doc;
   if (server.hasArg("voltage")) doc["voltage"] = server.arg("voltage").toFloat();
   if (server.hasArg("ledMode")) doc["ledMode"] = server.arg("ledMode");
@@ -345,7 +396,7 @@ void registerHttpHandlers() {
 void startConfigAP() {
   if (configApActive) return;
 
-  WiFi.mode(wifiControlActive ? WIFI_AP_STA : WIFI_AP);
+  WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(AP_SSID, AP_PASS);
   server.begin();
   configApActive = true;
@@ -380,6 +431,8 @@ void startWifiControlMode(const String& ssid, const String& pass) {
   } else {
     Serial.println("\nGAGAL: Tidak bisa konek WiFi dalam 15 detik, kembali ke mode Bluetooth...");
     prefs.putString("netMode", "ble");
+    prefs.putString("ssid", "");
+    prefs.putString("pass", "");
     delay(300);
     ESP.restart();
   }
@@ -390,9 +443,6 @@ void startBleMode() {
 
   NimBLEDevice::init(bleName.c_str());
 
-  // ---- Bonding "Just Works": koneksi otomatis terenkripsi tanpa PIN ----
-  // bonding=true, MITM=false (karena Just Works, tidak ada PIN untuk dicocokkan),
-  // Secure Connections=true (pakai algoritma enkripsi modern BLE 4.2+/5.0)
   NimBLEDevice::setSecurityAuth(true, false, true);
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
 
@@ -435,6 +485,11 @@ void startBleMode() {
 
 void handleBleAction(const String& action) {
   if (action == "start_wifi_setup") {
+    NimBLEDevice::deinit(true);
+    deviceConnected = false;
+    pCharacteristic = nullptr;
+    pServer = nullptr;
+    delay(300);
     startConfigAP();
   }
 }
@@ -449,14 +504,12 @@ void setup() {
   pinMode(PIN_ONBOARD_LED, OUTPUT);
   onboardLedWrite(false);
 
-  if (!CH224X1.begin()) {
-    Serial.println("CH224 not responding!");
-    while (1);
+  ch224aReady = CH224X1.begin();
+  if (!ch224aReady) {
+    Serial.println("CH224 not responding! Melanjutkan tanpa kontrol PD, akan dicoba lagi di background...");
+  } else {
+    CH224X1.setVoltage(0);
   }
-
-  CH224X1.setVoltage(0);
-  // current = CH224X1.getCurrentProfile() / 1000.0; // PD lets us query max current
-
 
   strip.begin();
   strip.setBrightness(80);
@@ -467,6 +520,7 @@ void setup() {
   netMode = prefs.getString("netMode", "ble");
   savedSsid = prefs.getString("ssid", "");
   savedPass = prefs.getString("pass", "");
+  httpAuthPass = loadOrCreateHttpAuthPass();
 
   registerHttpHandlers();
 
@@ -488,9 +542,6 @@ void loop() {
   char cmdBuf[129] = {0};
   portENTER_CRITICAL(&bleMux);
 
-
-
-
   if (bleWritePending) {
     memcpy(cmdBuf, bleCommandBuf, bleCommandLen);
     cmdBuf[bleCommandLen] = '\0';
@@ -501,7 +552,6 @@ void loop() {
   portEXIT_CRITICAL(&bleMux);
   String cmd = String(cmdBuf);
 
-  
   if (cmd.length() > 0) {
     processCommandJson(cmd);
 
@@ -520,29 +570,34 @@ void loop() {
     lastBeacon = millis();
   }
 
-  handleOnboardBlink();
+  handleStatusLed();
   handleLedAnimation();
 
-  // Baca status CH224X (I2C) & cetak debug, DI-THROTTLE — sebelumnya blok ini
-  // jalan setiap iterasi loop() tanpa jeda sama sekali (2x transaksi I2C +
-  // 4x Serial.print per loop), yang bikin loop() jadi lambat dan menunda
-  // pemrosesan command BLE berikutnya. Sekarang dibatasi tiap 200ms saja,
-  // dan dijalankan SEBELUM publishStatusBLE() supaya notify ke app bawa
-  // data terbaru, bukan data basi dari iterasi sebelumnya.
   static unsigned long lastCh224Read = 0;
-  if (millis() - lastCh224Read > 200) {
-    lastCh224Read = millis();
-    pgood = CH224X1.isPowerGood();
-    current = CH224X1.getCurrentProfile() / 1000.0; // PD lets us query max current
-    chargerwatt = current * currentSetVoltage;
-    Serial.print("Maximum current : ");
-    Serial.print(current, 0);
-    Serial.println(" A)");
-    Serial.print("Available power : ");
-    Serial.print(chargerwatt);
-    Serial.println(" W");
-    Serial.print("power good : ");
-    Serial.println(pgood);
+  static unsigned long lastCh224Retry = 0;
+  if (ch224aReady) {
+    if (millis() - lastCh224Read > 200) {
+      lastCh224Read = millis();
+      pgood = CH224X1.isPowerGood();
+      current = CH224X1.getCurrentProfile() / 1000.0;
+      chargerwatt = current * currentSetVoltage;
+      Serial.print("Maximum current : ");
+      Serial.print(current, 0);
+      Serial.println(" A)");
+      Serial.print("Available power : ");
+      Serial.print(chargerwatt);
+      Serial.println(" W");
+      Serial.print("power good : ");
+      Serial.println(pgood);
+    }
+  } else if (millis() - lastCh224Retry > 3000) {
+    lastCh224Retry = millis();
+    Serial.println("Mencoba deteksi ulang CH224A...");
+    ch224aReady = CH224X1.begin();
+    if (ch224aReady) {
+      Serial.println("CH224A terdeteksi.");
+      CH224X1.setVoltage(0);
+    }
   }
 
   if (millis() - lastPublish > 300) {
