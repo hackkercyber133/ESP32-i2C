@@ -503,6 +503,8 @@ class _ControllerPageState extends State<ControllerPage> {
   // tetap secara fisik: 5V / 9V / 12V / 15V. Tidak ada mode kontinu.
   double setVolt = 5.0; // voltase yang sedang aktif/terkirim
   double chargerWatt = 0.0; // watt maksimum charger, dari field "chargerWatt" firmware
+  int fanSpeed = 100; // persentase PWM fan (0-100), dari field "fanSpeed" firmware
+  int fanRpm = 0; // RPM aktual fan, dari field "fanRpm" firmware (hasil baca tachometer)
   String ledMode = "off"; // "off" | "static" | "running" | "disco" | "bounce"
   String lastLedEffect = "running"; // efek terakhir dipilih, dipakai saat tombol ON
   String uptime = "00:00:00";
@@ -755,12 +757,16 @@ class _ControllerPageState extends State<ControllerPage> {
     final rawReady = data['ch224aReady'];
     final rawPdStatus = data['pdStatus'];
     final rawChargerWatt = data['chargerWatt'];
+    final rawFanSpeed = data['fanSpeed'];
+    final rawFanRpm = data['fanRpm'];
 
     if (rawVoltage is num) setVolt = rawVoltage.toDouble();
     if (rawPowerGood is bool) powerGood = rawPowerGood;
     if (rawReady is bool) ch224aReady = rawReady;
     if (rawPdStatus is String) pdStatus = rawPdStatus;
     if (rawChargerWatt is num) chargerWatt = rawChargerWatt.toDouble();
+    if (rawFanSpeed is num) fanSpeed = rawFanSpeed.toInt();
+    if (rawFanRpm is num) fanRpm = rawFanRpm.toInt();
     ledMode = data['ledMode'] ?? ledMode;
     uptime = data['uptime'] ?? uptime;
     if (ledMode != "off") lastLedEffect = ledMode;
@@ -1069,6 +1075,57 @@ class _ControllerPageState extends State<ControllerPage> {
       sendCommandLocalWifi(volt);
     } else {
       sendCommandBLE(volt);
+    }
+  }
+
+  void sendFanSpeed(int percent) {
+    if (activeCooler == null) {
+      _showSnack("⚠️ Pilih atau tambah cooler dulu");
+      return;
+    }
+    percent = percent.clamp(0, 100);
+    if (connectionMode == "WiFi") {
+      sendFanSpeedLocalWifi(percent);
+    } else {
+      sendFanSpeedBLE(percent);
+    }
+  }
+
+  void sendFanSpeedLocalWifi(int percent) async {
+    if (_wifiIp == null) {
+      _showSnack("⚠️ Belum menemukan ESP32 di jaringan, tunggu sebentar / cek WiFi HP");
+      return;
+    }
+    try {
+      final response = await http
+          .post(Uri.http(_wifiIp!, "/set", {"fanSpeed": percent.toString()}), headers: esp32AuthHeaders(activeCooler))
+          .timeout(Duration(seconds: 3));
+      if (response.statusCode == 200) {
+        try {
+          final data = jsonDecode(response.body);
+          if (data is Map<String, dynamic>) {
+            setState(() => _applyDeviceStatus(data));
+          }
+        } catch (_) {}
+      } else {
+        _showSnack("❌ ESP32 menolak perintah fan speed");
+      }
+    } catch (e) {
+      _showSnack("⚠️ Gagal kirim perintah, cek koneksi WiFi");
+    }
+  }
+
+  void sendFanSpeedBLE(int percent) async {
+    if (!bleConnected || bleDevice == null) {
+      setState(() => status = "🔴 Offline");
+      _showSnack("⚠️ Belum terhubung ke perangkat Bluetooth");
+      return;
+    }
+    final ok = await _writeControlBLE({"fanSpeed": percent});
+    if (ok) {
+      setState(() => fanSpeed = percent);
+    } else {
+      _showSnack("❌ Gagal mengirim perintah ke perangkat");
     }
   }
 
@@ -2124,6 +2181,8 @@ class _ControllerPageState extends State<ControllerPage> {
               const SizedBox(height: 12),
               _nexusVoltageGrid(isDark),
               const SizedBox(height: 12),
+              _nexusFanControl(isDark),
+              const SizedBox(height: 12),
               _nexusMetrics(isDark),
               const SizedBox(height: 12),
               _nexusRgbCard(isDark),
@@ -2274,6 +2333,48 @@ class _ControllerPageState extends State<ControllerPage> {
         }).toList(),
       ),
     ]);
+  }
+
+  Widget _nexusFanControl(bool isDark) {
+    final c = Colors.cyanAccent;
+    return _nexusCard(isDark, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      _nexusSectionTitle(isDark, 'FAN CONTROL', 'PWM 4-pin • 12V konstan'),
+      const SizedBox(height: 12),
+      Row(children: [
+        Icon(Icons.air_rounded, color: c, size: 18),
+        const SizedBox(width: 8),
+        Text('$fanSpeed%', style: TextStyle(color: AppColors.text(isDark), fontSize: 22, fontWeight: FontWeight.w900)),
+        const Spacer(),
+        Row(children: [
+          Icon(Icons.speed_rounded, color: AppColors.textFaint(isDark), size: 14),
+          const SizedBox(width: 4),
+          Text('$fanRpm RPM', style: TextStyle(color: AppColors.textFaint(isDark), fontSize: 11, fontWeight: FontWeight.w700)),
+        ]),
+      ]),
+      const SizedBox(height: 4),
+      SliderTheme(
+        data: SliderTheme.of(context).copyWith(
+          activeTrackColor: c,
+          inactiveTrackColor: c.withOpacity(.15),
+          thumbColor: c,
+          overlayColor: c.withOpacity(.15),
+          trackHeight: 5,
+        ),
+        child: Slider(
+          value: fanSpeed.toDouble(),
+          min: 0,
+          max: 100,
+          divisions: 20,
+          label: '$fanSpeed%',
+          onChanged: (v) => setState(() => fanSpeed = v.round()),
+          onChangeEnd: (v) => sendFanSpeed(v.round()),
+        ),
+      ),
+      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+        Text('0%', style: TextStyle(color: AppColors.textFaint(isDark), fontSize: 9)),
+        Text('100%', style: TextStyle(color: AppColors.textFaint(isDark), fontSize: 9)),
+      ]),
+    ]));
   }
 
   Widget _nexusMetrics(bool isDark) => _nexusCard(isDark, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
