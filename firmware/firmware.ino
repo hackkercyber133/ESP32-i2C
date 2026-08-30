@@ -41,6 +41,48 @@ int bounceDir = 1;
 #define PIN_ONBOARD_LED 8
 #define ONBOARD_LED_ACTIVE_LOW true
 
+// ===== Kontrol fan PWM 4-pin (Delta AFB0512LB, 12V) =====
+// Kabel merah/hitam tetap ke +VOUT/GND PD Trigger (12V konstan, lihat
+// MAX_SAFE_VOLTAGE). Kabel biru (PWM) & kuning (tach) ke GPIO ESP32 ini.
+#define FAN_PWM_PIN   2   // kabel biru - sinyal PWM 25kHz standar fan 4-pin
+#define FAN_TACH_PIN  3   // kabel kuning - pulsa tachometer (2 pulsa/putaran)
+#define FAN_PWM_CHANNEL   0
+#define FAN_PWM_FREQ_HZ   25000  // 25kHz, standar spec Intel 4-wire PWM fan
+#define FAN_PWM_RESOLUTION 8     // 0-255
+
+int fanSpeedPercent = 100; // default nyala full speed
+volatile uint32_t fanTachPulseCount = 0;
+unsigned int fanRpm = 0;
+unsigned long lastFanRpmCalc = 0;
+
+void IRAM_ATTR fanTachISR() {
+  fanTachPulseCount++;
+}
+
+void setFanSpeed(int percent) {
+  if (percent < 0) percent = 0;
+  if (percent > 100) percent = 100;
+  fanSpeedPercent = percent;
+  uint8_t duty = (uint8_t)map(percent, 0, 100, 0, 255);
+  ledcWrite(FAN_PWM_CHANNEL, duty);
+}
+
+// Dipanggil tiap ~1 detik dari loop() - hitung RPM dari jumlah pulsa
+// tachometer yang masuk sejak perhitungan terakhir. Fan pada umumnya
+// ngirim 2 pulsa per satu putaran penuh.
+void updateFanRpm() {
+  noInterrupts();
+  uint32_t pulses = fanTachPulseCount;
+  fanTachPulseCount = 0;
+  interrupts();
+
+  unsigned long elapsedMs = millis() - lastFanRpmCalc;
+  lastFanRpmCalc = millis();
+  if (elapsedMs == 0) return;
+
+  fanRpm = (unsigned int)((pulses / 2.0) * (60000.0 / elapsedMs));
+}
+
 void onboardLedWrite(bool on) {
   digitalWrite(PIN_ONBOARD_LED, (ONBOARD_LED_ACTIVE_LOW ? !on : on) ? LOW : HIGH);
 }
@@ -183,18 +225,27 @@ class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
+// Voltase maksimum yang boleh diminta lewat app/HTTP - di-clamp ke 12V
+// karena fan NMB-MAT 12V yang dipakai di project ini cuma rated 12V.
+// 15V (~25% overvoltage) bisa bikin motor fan cepat panas/rusak.
+#define MAX_SAFE_VOLTAGE 12.0
+
 void applyVoltage(float volt) {
   if (volt >= 13.5) volt = 15.0;
   else if (volt >= 10.5) volt = 12.0;
   else if (volt >= 7.0) volt = 9.0;
   else volt = 5.0;
+
+  if (volt > MAX_SAFE_VOLTAGE) volt = MAX_SAFE_VOLTAGE;
+
   if (volt == 9.0) {
     CH224X1.setVoltage(1);
   } else if (volt == 12.0) {
     CH224X1.setVoltage(2);
-  } else if (volt == 15.0) {
-    CH224X1.setVoltage(3);
   } else {
+    // volt == 5.0. Kode setVoltage(3)/15V sengaja tidak dipakai lagi -
+    // sudah di-clamp ke MAX_SAFE_VOLTAGE di atas, jadi tidak akan pernah
+    // ke branch 15V kecuali MAX_SAFE_VOLTAGE dinaikkan lagi nanti.
     CH224X1.setVoltage(0);
   }
   currentSetVoltage = volt;
@@ -282,6 +333,8 @@ String buildStatusJson(bool includeSecret) {
   doc["chargerWatt"] = chargerwatt;
   doc["powerGood"] = pgood;
   doc["ch224aReady"] = ch224aReady;
+  doc["fanSpeed"] = fanSpeedPercent;
+  doc["fanRpm"] = fanRpm;
   // httpAuthPass HANYA disertakan lewat jalur BLE (terenkripsi+bonding).
   // JANGAN pernah true di jalur HTTP /status — endpoint itu tanpa auth
   // dan bisa diakses siapa saja di jaringan WiFi yang sama.
@@ -308,6 +361,10 @@ void processCommandJson(const String& cmd) {
   }
   if (doc["ledMode"].is<const char*>()) {
     applyLedMode(doc["ledMode"].as<String>());
+    triggerCmdBlink();
+  }
+  if (doc["fanSpeed"].is<int>()) {
+    setFanSpeed(doc["fanSpeed"]);
     triggerCmdBlink();
   }
 }
@@ -369,6 +426,7 @@ void handleSetCmd() {
   JsonDocument doc;
   if (server.hasArg("voltage")) doc["voltage"] = server.arg("voltage").toFloat();
   if (server.hasArg("ledMode")) doc["ledMode"] = server.arg("ledMode");
+  if (server.hasArg("fanSpeed")) doc["fanSpeed"] = server.arg("fanSpeed").toInt();
   if (server.hasArg("action")) doc["action"] = server.arg("action");
   String cmd;
   serializeJson(doc, cmd);
@@ -504,6 +562,14 @@ void setup() {
   pinMode(PIN_ONBOARD_LED, OUTPUT);
   onboardLedWrite(false);
 
+  ledcSetup(FAN_PWM_CHANNEL, FAN_PWM_FREQ_HZ, FAN_PWM_RESOLUTION);
+  ledcAttachPin(FAN_PWM_PIN, FAN_PWM_CHANNEL);
+  setFanSpeed(fanSpeedPercent);
+
+  pinMode(FAN_TACH_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(FAN_TACH_PIN), fanTachISR, FALLING);
+  lastFanRpmCalc = millis();
+
   ch224aReady = CH224X1.begin();
   if (!ch224aReady) {
     Serial.println("CH224 not responding! Melanjutkan tanpa kontrol PD, akan dicoba lagi di background...");
@@ -572,6 +638,10 @@ void loop() {
 
   handleStatusLed();
   handleLedAnimation();
+
+  if (millis() - lastFanRpmCalc >= 1000) {
+    updateFanRpm();
+  }
 
   static unsigned long lastCh224Read = 0;
   static unsigned long lastCh224Retry = 0;
