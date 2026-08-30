@@ -149,6 +149,11 @@ workflows:
           echo "--- proguard-rules.pro dibuat ---"
       - name: Ambil dependency Flutter
         script: flutter pub get
+      - name: Terapkan ikon aplikasi dari assets/icon/app_icon.png
+        script: |
+          dart run flutter_launcher_icons
+          echo "--- Ikon launcher yang dihasilkan: ---"
+          ls -la android/app/src/main/res/mipmap-xxxhdpi/ 2>/dev/null || true
       - name: Build APK (obfuscated + minified)
         script: |
           flutter build apk --release --obfuscate --split-debug-info=build/debug-info
