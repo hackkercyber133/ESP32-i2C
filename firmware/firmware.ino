@@ -11,6 +11,11 @@
 #include <esp_random.h>
 #include <CH224X_I2C.h>
 
+// Dipindah ke atas (sebelum dipakai) - setFanSpeed()/applyVoltage()/
+// applyLedMode() perlu akses prefs buat persist setting, dan fungsi-fungsi
+// itu didefinisikan lebih awal di file ini daripada deklarasi lama.
+Preferences prefs;
+
 String deviceId;
 String bleName;
 bool deviceConnected = false;
@@ -65,6 +70,10 @@ void setFanSpeed(int percent) {
   fanSpeedPercent = percent;
   uint8_t duty = (uint8_t)map(percent, 0, 100, 0, 255);
   ledcWrite(FAN_PWM_CHANNEL, duty);
+
+  if (prefs.getInt("fanSpeed", -1) != fanSpeedPercent) {
+    prefs.putInt("fanSpeed", fanSpeedPercent);
+  }
 }
 
 // Dipanggil tiap ~1 detik dari loop() - hitung RPM dari jumlah pulsa
@@ -135,7 +144,6 @@ float chargerwatt = 0;
 bool pgood = 0;
 bool ch224aReady = false;
 
-Preferences prefs;
 String netMode;
 String savedSsid;
 String savedPass;
@@ -249,6 +257,14 @@ void applyVoltage(float volt) {
     CH224X1.setVoltage(0);
   }
   currentSetVoltage = volt;
+
+  // Simpan ke flash (NVS) supaya bertahan walau ESP32 mati-hidup. Cuma
+  // ditulis kalau nilainya beda dari yang tersimpan - NVS punya batas
+  // umur tulis, jadi hindari nulis ulang nilai yang sama tiap kali fungsi
+  // ini dipanggil (mis. dari auto-negotiate PD).
+  if (prefs.getFloat("voltage", -1.0) != currentSetVoltage) {
+    prefs.putFloat("voltage", currentSetVoltage);
+  }
 }
 
 uint32_t wheelColor(byte pos) {
@@ -277,6 +293,10 @@ void applyLedMode(String mode) {
   } else if (mode == "bounce") {
     bouncePos = 0;
     bounceDir = 1;
+  }
+
+  if (prefs.getString("ledMode", "") != ledMode) {
+    prefs.putString("ledMode", ledMode);
   }
 }
 
@@ -559,12 +579,27 @@ void setup() {
   deviceId = computeDeviceId();
   bleName = "ESP32-Cooler-" + deviceId;
 
+  // prefs.begin() dipindah ke paling awal - sebelumnya ini dipanggil di
+  // akhir setup(), SETELAH fan/voltase/LED sudah kadung di-set ke nilai
+  // hardcoded (100%, 5V, off). Akibatnya setting yang tersimpan gak
+  // pernah kepakai pas boot, dan applyVoltage()/setFanSpeed()/applyLedMode()
+  // yang dipanggil sebelum baris ini juga gagal nyimpen (prefs belum siap).
+  prefs.begin("cooler", false);
+  netMode = prefs.getString("netMode", "ble");
+  savedSsid = prefs.getString("ssid", "");
+  savedPass = prefs.getString("pass", "");
+  httpAuthPass = loadOrCreateHttpAuthPass();
+
+  float savedVoltage = prefs.getFloat("voltage", 5.0);
+  int savedFanSpeed = prefs.getInt("fanSpeed", 100);
+  String savedLedMode = prefs.getString("ledMode", "off");
+
   pinMode(PIN_ONBOARD_LED, OUTPUT);
   onboardLedWrite(false);
 
   ledcSetup(FAN_PWM_CHANNEL, FAN_PWM_FREQ_HZ, FAN_PWM_RESOLUTION);
   ledcAttachPin(FAN_PWM_PIN, FAN_PWM_CHANNEL);
-  setFanSpeed(fanSpeedPercent);
+  setFanSpeed(savedFanSpeed);
 
   pinMode(FAN_TACH_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(FAN_TACH_PIN), fanTachISR, FALLING);
@@ -574,19 +609,13 @@ void setup() {
   if (!ch224aReady) {
     Serial.println("CH224 not responding! Melanjutkan tanpa kontrol PD, akan dicoba lagi di background...");
   } else {
-    CH224X1.setVoltage(0);
+    applyVoltage(savedVoltage);
   }
 
   strip.begin();
   strip.setBrightness(80);
   strip.show();
-  applyLedMode("off");
-
-  prefs.begin("cooler", false);
-  netMode = prefs.getString("netMode", "ble");
-  savedSsid = prefs.getString("ssid", "");
-  savedPass = prefs.getString("pass", "");
-  httpAuthPass = loadOrCreateHttpAuthPass();
+  applyLedMode(savedLedMode);
 
   registerHttpHandlers();
 
