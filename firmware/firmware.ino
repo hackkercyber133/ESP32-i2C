@@ -11,9 +11,6 @@
 #include <esp_random.h>
 #include <CH224X_I2C.h>
 
-// Dipindah ke atas (sebelum dipakai) - setFanSpeed()/applyVoltage()/
-// applyLedMode() perlu akses prefs buat persist setting, dan fungsi-fungsi
-// itu didefinisikan lebih awal di file ini daripada deklarasi lama.
 Preferences prefs;
 
 String deviceId;
@@ -31,7 +28,51 @@ String computeDeviceId() {
 #define SCL_PIN      6
 #define PG_PIN       7
 
-CH224X_I2C CH224X1(Wire, 0x23, PG_PIN);
+#define CH224_ADDR_PRIMARY   0x23
+#define CH224_ADDR_SECONDARY 0x22
+
+CH224X_I2C* CH224X1 = nullptr;
+uint8_t ch224Addr = CH224_ADDR_PRIMARY;
+
+bool ch224Begin() {
+  if (CH224X1 != nullptr) {
+    delete CH224X1;
+    CH224X1 = nullptr;
+  }
+  CH224X1 = new CH224X_I2C(Wire, CH224_ADDR_PRIMARY, PG_PIN);
+  if (CH224X1->begin()) {
+    ch224Addr = CH224_ADDR_PRIMARY;
+    return true;
+  }
+  delete CH224X1;
+  CH224X1 = new CH224X_I2C(Wire, CH224_ADDR_SECONDARY, PG_PIN);
+  if (CH224X1->begin()) {
+    ch224Addr = CH224_ADDR_SECONDARY;
+    return true;
+  }
+  return false;
+}
+
+void scanI2CBus() {
+  Serial.println("Scanning I2C bus...");
+  int found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    uint8_t err = Wire.endTransmission();
+    if (err == 0) {
+      Serial.print("  Perangkat I2C ditemukan di alamat 0x");
+      if (addr < 16) Serial.print("0");
+      Serial.println(addr, HEX);
+      found++;
+    }
+  }
+  if (found == 0) {
+    Serial.println("  Tidak ada perangkat I2C terdeteksi sama sekali di bus! Cek wiring/pull-up SDA-SCL.");
+  } else {
+    Serial.print("  Total perangkat I2C ditemukan: ");
+    Serial.println(found);
+  }
+}
 
 #define PIN_LED_DATA 4
 #define NUM_LEDS 30
@@ -44,18 +85,16 @@ int bouncePos = 0;
 int bounceDir = 1;
 
 #define PIN_ONBOARD_LED 8
+#define BOOT_BTN_PIN 9
 #define ONBOARD_LED_ACTIVE_LOW true
 
-// ===== Kontrol fan PWM 4-pin (Delta AFB0512LB, 12V) =====
-// Kabel merah/hitam tetap ke +VOUT/GND PD Trigger (12V konstan, lihat
-// MAX_SAFE_VOLTAGE). Kabel biru (PWM) & kuning (tach) ke GPIO ESP32 ini.
-#define FAN_PWM_PIN   2   // kabel biru - sinyal PWM 25kHz standar fan 4-pin
-#define FAN_TACH_PIN  3   // kabel kuning - pulsa tachometer (2 pulsa/putaran)
+#define FAN_PWM_PIN   2
+#define FAN_TACH_PIN  3
 #define FAN_PWM_CHANNEL   0
-#define FAN_PWM_FREQ_HZ   25000  // 25kHz, standar spec Intel 4-wire PWM fan
-#define FAN_PWM_RESOLUTION 8     // 0-255
+#define FAN_PWM_FREQ_HZ   25000
+#define FAN_PWM_RESOLUTION 8
 
-int fanSpeedPercent = 100; // default nyala full speed
+int fanSpeedPercent = 100;
 volatile uint32_t fanTachPulseCount = 0;
 unsigned int fanRpm = 0;
 unsigned long lastFanRpmCalc = 0;
@@ -69,16 +108,13 @@ void setFanSpeed(int percent) {
   if (percent > 100) percent = 100;
   fanSpeedPercent = percent;
   uint8_t duty = (uint8_t)map(percent, 0, 100, 0, 255);
-  ledcWrite(FAN_PWM_CHANNEL, duty);
+  ledcWrite(FAN_PWM_PIN, duty);
 
   if (prefs.getInt("fanSpeed", -1) != fanSpeedPercent) {
     prefs.putInt("fanSpeed", fanSpeedPercent);
   }
 }
 
-// Dipanggil tiap ~1 detik dari loop() - hitung RPM dari jumlah pulsa
-// tachometer yang masuk sejak perhitungan terakhir. Fan pada umumnya
-// ngirim 2 pulsa per satu putaran penuh.
 void updateFanRpm() {
   noInterrupts();
   uint32_t pulses = fanTachPulseCount;
@@ -233,35 +269,24 @@ class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
-// Voltase maksimum yang boleh diminta lewat app/HTTP - di-clamp ke 12V
-// karena fan NMB-MAT 12V yang dipakai di project ini cuma rated 12V.
-// 15V (~25% overvoltage) bisa bikin motor fan cepat panas/rusak.
-#define MAX_SAFE_VOLTAGE 12.0
-
 void applyVoltage(float volt) {
   if (volt >= 13.5) volt = 15.0;
   else if (volt >= 10.5) volt = 12.0;
   else if (volt >= 7.0) volt = 9.0;
   else volt = 5.0;
 
-  if (volt > MAX_SAFE_VOLTAGE) volt = MAX_SAFE_VOLTAGE;
-
   if (volt == 9.0) {
-    CH224X1.setVoltage(1);
+    CH224X1->setVoltage(1);
   } else if (volt == 12.0) {
-    CH224X1.setVoltage(2);
+    CH224X1->setVoltage(2);
+  } else if (volt == 15.0) {
+    CH224X1->setVoltage(3);
   } else {
-    // volt == 5.0. Kode setVoltage(3)/15V sengaja tidak dipakai lagi -
-    // sudah di-clamp ke MAX_SAFE_VOLTAGE di atas, jadi tidak akan pernah
-    // ke branch 15V kecuali MAX_SAFE_VOLTAGE dinaikkan lagi nanti.
-    CH224X1.setVoltage(0);
+
+    CH224X1->setVoltage(0);
   }
   currentSetVoltage = volt;
 
-  // Simpan ke flash (NVS) supaya bertahan walau ESP32 mati-hidup. Cuma
-  // ditulis kalau nilainya beda dari yang tersimpan - NVS punya batas
-  // umur tulis, jadi hindari nulis ulang nilai yang sama tiap kali fungsi
-  // ini dipanggil (mis. dari auto-negotiate PD).
   if (prefs.getFloat("voltage", -1.0) != currentSetVoltage) {
     prefs.putFloat("voltage", currentSetVoltage);
   }
@@ -355,9 +380,7 @@ String buildStatusJson(bool includeSecret) {
   doc["ch224aReady"] = ch224aReady;
   doc["fanSpeed"] = fanSpeedPercent;
   doc["fanRpm"] = fanRpm;
-  // httpAuthPass HANYA disertakan lewat jalur BLE (terenkripsi+bonding).
-  // JANGAN pernah true di jalur HTTP /status — endpoint itu tanpa auth
-  // dan bisa diakses siapa saja di jaringan WiFi yang sama.
+
   if (includeSecret) doc["httpAuthPass"] = httpAuthPass;
   String jsonStr;
   serializeJson(doc, jsonStr);
@@ -503,6 +526,7 @@ void startWifiControlMode(const String& ssid, const String& pass) {
   }
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\nSUKSES: WiFi tersambung, IP: " + WiFi.localIP().toString());
+    WiFi.setSleep(false); // matikan modem-sleep — sering jadi penyebab WiFi ESP32 putus sendiri
     server.begin();
     udp.begin(UDP_BEACON_PORT);
     wifiControlActive = true;
@@ -575,20 +599,31 @@ void handleBleAction(const String& action) {
 void setup() {
   Serial.begin(115200);
   delay(1000);
+  pinMode(SDA_PIN, INPUT_PULLUP);
+  pinMode(SCL_PIN, INPUT_PULLUP);
   Wire.begin(SDA_PIN, SCL_PIN);
+  scanI2CBus();
   deviceId = computeDeviceId();
   bleName = "ESP32-Cooler-" + deviceId;
 
-  // prefs.begin() dipindah ke paling awal - sebelumnya ini dipanggil di
-  // akhir setup(), SETELAH fan/voltase/LED sudah kadung di-set ke nilai
-  // hardcoded (100%, 5V, off). Akibatnya setting yang tersimpan gak
-  // pernah kepakai pas boot, dan applyVoltage()/setFanSpeed()/applyLedMode()
-  // yang dipanggil sebelum baris ini juga gagal nyimpen (prefs belum siap).
   prefs.begin("cooler", false);
   netMode = prefs.getString("netMode", "ble");
   savedSsid = prefs.getString("ssid", "");
   savedPass = prefs.getString("pass", "");
   httpAuthPass = loadOrCreateHttpAuthPass();
+
+  // Tombol darurat: tahan tombol BOOT fisik di board sambil menyalakan/reset
+  // ESP32 untuk memaksa balik ke mode Bluetooth + AP config, walaupun
+  // sebelumnya tersimpan di mode WiFi. Ini jalan keluar kalau device
+  // kejebak di mode WiFi (mis. WiFi berhasil connect tapi app gagal sync)
+  // dan BLE/AP config jadi tidak bisa diakses sama sekali - tanpa ini,
+  // satu-satunya jalan keluar adalah erase flash total.
+  pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
+  if (digitalRead(BOOT_BTN_PIN) == LOW) {
+    Serial.println("Tombol BOOT ditahan saat menyala - paksa balik ke mode Bluetooth + AP config.");
+    netMode = "ble";
+    prefs.putString("netMode", "ble");
+  }
 
   float savedVoltage = prefs.getFloat("voltage", 5.0);
   int savedFanSpeed = prefs.getInt("fanSpeed", 100);
@@ -597,18 +632,19 @@ void setup() {
   pinMode(PIN_ONBOARD_LED, OUTPUT);
   onboardLedWrite(false);
 
-  ledcSetup(FAN_PWM_CHANNEL, FAN_PWM_FREQ_HZ, FAN_PWM_RESOLUTION);
-  ledcAttachPin(FAN_PWM_PIN, FAN_PWM_CHANNEL);
+  ledcAttach(FAN_PWM_PIN, FAN_PWM_FREQ_HZ, FAN_PWM_RESOLUTION);
   setFanSpeed(savedFanSpeed);
 
   pinMode(FAN_TACH_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(FAN_TACH_PIN), fanTachISR, FALLING);
   lastFanRpmCalc = millis();
 
-  ch224aReady = CH224X1.begin();
+  ch224aReady = ch224Begin();
   if (!ch224aReady) {
     Serial.println("CH224 not responding! Melanjutkan tanpa kontrol PD, akan dicoba lagi di background...");
   } else {
+    Serial.print("CH224 terdeteksi di alamat I2C 0x");
+    Serial.println(ch224Addr, HEX);
     applyVoltage(savedVoltage);
   }
 
@@ -665,6 +701,29 @@ void loop() {
     lastBeacon = millis();
   }
 
+  static unsigned long lastWifiCheck = 0;
+  static unsigned long wifiDownSince = 0;
+  if (wifiControlActive && millis() - lastWifiCheck > 2000) {
+    lastWifiCheck = millis();
+    if (WiFi.status() != WL_CONNECTED) {
+      if (wifiDownSince == 0) {
+        wifiDownSince = millis();
+        Serial.println("WiFi terputus, mencoba reconnect...");
+        WiFi.reconnect();
+      } else if (millis() - wifiDownSince > 20000) {
+        // 20 detik nggak pulih-pulih — daripada device nyangkut mati total
+        // (WiFi mati, BLE juga sudah dimatikan sejak masuk mode WiFi),
+        // lebih baik balik bersih ke mode Bluetooth lewat restart.
+        Serial.println("WiFi tidak pulih dalam 20 detik, kembali ke mode Bluetooth...");
+        prefs.putString("netMode", "ble");
+        delay(300);
+        ESP.restart();
+      }
+    } else {
+      wifiDownSince = 0;
+    }
+  }
+
   handleStatusLed();
   handleLedAnimation();
 
@@ -677,8 +736,8 @@ void loop() {
   if (ch224aReady) {
     if (millis() - lastCh224Read > 200) {
       lastCh224Read = millis();
-      pgood = CH224X1.isPowerGood();
-      current = CH224X1.getCurrentProfile() / 1000.0;
+      pgood = CH224X1->isPowerGood();
+      current = CH224X1->getCurrentProfile() / 1000.0;
       chargerwatt = current * currentSetVoltage;
       Serial.print("Maximum current : ");
       Serial.print(current, 0);
@@ -692,10 +751,10 @@ void loop() {
   } else if (millis() - lastCh224Retry > 3000) {
     lastCh224Retry = millis();
     Serial.println("Mencoba deteksi ulang CH224A...");
-    ch224aReady = CH224X1.begin();
+    ch224aReady = ch224Begin();
     if (ch224aReady) {
       Serial.println("CH224A terdeteksi.");
-      CH224X1.setVoltage(0);
+      CH224X1->setVoltage(0);
     }
   }
 
