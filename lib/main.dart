@@ -284,7 +284,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
                             ).createShader(bounds);
                           },
                           child: const Text(
-                            'COOLER CONTROLLER',
+                            'VLADIMIR PUTIN',
                             style: TextStyle(
                               fontSize: 26,
                               fontWeight: FontWeight.w900,
@@ -299,7 +299,7 @@ class _SplashScreenState extends State<SplashScreen> with TickerProviderStateMix
                     Opacity(
                       opacity: subtitleT,
                       child: Text(
-                        'GAME-GRADE VOLTAGE ENGINE',
+                        'COOLER CONTROLLER',
                         style: TextStyle(
                           fontSize: 11,
                           letterSpacing: 4,
@@ -553,6 +553,7 @@ class _ControllerPageState extends State<ControllerPage> {
     ].request();
 
     await _loadPairedCoolers();
+    await _loadAccentColor();
     _schedules = await ScheduleService.loadAll();
 
     // Cek jadwal tiap 30 detik, cek status offline tiap 1 menit — cukup
@@ -635,6 +636,24 @@ class _ControllerPageState extends State<ControllerPage> {
     if (activeCooler != null) {
       await prefs.setString('active_cooler_id', activeCooler!.id);
     }
+  }
+
+  // ===== PENYIMPANAN WARNA TEMA (persist antar sesi app) =====
+  // Sebelumnya accentColor cuma diubah lewat setState() tanpa pernah
+  // ditulis ke SharedPreferences, jadi selalu balik ke cyanAccent default
+  // tiap app dibuka ulang - sama kelasnya dengan bug voltase/fan speed
+  // yang gak persist di ESP32.
+  Future<void> _loadAccentColor() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getInt('accent_color_value');
+    if (saved != null) {
+      setState(() => accentColor = Color(saved));
+    }
+  }
+
+  Future<void> _saveAccentColor(Color color) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('accent_color_value', color.value);
   }
 
   // ===== SAMBUNGKAN KE COOLER YANG SEDANG AKTIF =====
@@ -1359,6 +1378,7 @@ class _ControllerPageState extends State<ControllerPage> {
         status = "🔴 Offline";
       });
       await _savePairedCoolers();
+      if (importedAccent != null) await _saveAccentColor(Color(importedAccent));
       await ScheduleService.saveAll(importedSchedules);
       _schedules = importedSchedules;
       if (importedTheme != null) {
@@ -1619,7 +1639,7 @@ class _ControllerPageState extends State<ControllerPage> {
                 Divider(color: Colors.white24, height: 20),
                 Text("Status", style: TextStyle(color: accentColor, fontWeight: FontWeight.bold)),
                 SizedBox(height: 4),
-                Text("Aplikasi ini FREE dan TIDAK untuk diperjualbelikan."),
+                Text("APLIKASI INI FREE DAN TIDAK UNTUK DI PERJUAL BELIKAN."),
               ],
             ),
           ),
@@ -1701,7 +1721,7 @@ class _ControllerPageState extends State<ControllerPage> {
                       controller: nicknameController,
                       style: TextStyle(color: Colors.white),
                       decoration: InputDecoration(
-                        labelText: "Nama cooler (mis. Cooler Kamar)",
+                        labelText: "Nama cooler (mis. Cooler Anjay)",
                         labelStyle: TextStyle(color: Colors.white54),
                         enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
                       ),
@@ -2018,7 +2038,7 @@ class _ControllerPageState extends State<ControllerPage> {
                 children: colorPalette.map((c) {
                   bool selected = accentColor.value == c.value;
                   return GestureDetector(
-                    onTap: () => setState(() => accentColor = c),
+                    onTap: () { setState(() => accentColor = c); _saveAccentColor(c); },
                     child: Container(
                       width: 32,
                       height: 32,
@@ -2490,7 +2510,7 @@ class _ControllerPageState extends State<ControllerPage> {
           Text('ACCENT COLOR', style: TextStyle(color: AppColors.textFaint(isDark), fontSize: 9, letterSpacing: 1.5)),
           const SizedBox(height: 10),
           Wrap(spacing: 11, runSpacing: 11, children: colorPalette.map((c) => GestureDetector(
-            onTap: () { setState(() => accentColor = c); setSheet(() {}); },
+            onTap: () { setState(() => accentColor = c); _saveAccentColor(c); setSheet(() {}); },
             child: CircleAvatar(radius: 18, backgroundColor: c, child: accentColor.value == c.value ? const Icon(Icons.check, color: Colors.black, size: 17) : null),
           )).toList()),
         ]),
