@@ -491,6 +491,12 @@ class _ControllerPageState extends State<ControllerPage> {
   Timer? _wifiPollTimer;
   static const int kUdpBeaconPort = 47269;
 
+  // Status setup WiFi terakhir (ditampilkan persist di drawer, bukan cuma toast
+  // yang cepat hilang) - diisi oleh connectWiFi() saat berhasil/gagal.
+  String? _wifiSetupStatusText;
+  bool _wifiSetupStatusIsError = false;
+  String? _wifiSetupDeviceId; // ID Perangkat yang berhasil terhubung, ditampilkan di bawah "Setup WiFi ESP32"
+
   // ===== BLUETOOTH =====
   BluetoothDevice? bleDevice;
   BluetoothCharacteristic? _controlChar; // cache karakteristik supaya tidak discoverServices() tiap kirim perintah
@@ -901,6 +907,9 @@ class _ControllerPageState extends State<ControllerPage> {
       setState(() {
         if (activeCooler != null) activeCooler!.mode = "Bluetooth";
         status = "🔴 Offline";
+        _wifiSetupStatusText = "ℹ️ Dipindah manual ke mode Bluetooth";
+        _wifiSetupStatusIsError = false;
+        _wifiSetupDeviceId = null;
       });
       await _savePairedCoolers();
       await Future.delayed(Duration(seconds: 5));
@@ -1198,6 +1207,11 @@ class _ControllerPageState extends State<ControllerPage> {
           // Firmware lama tanpa deviceId di respons -> tetap lanjut pakai activeCooler saat ini (kalau ada).
         }
         _showSnack("✅ ESP32 berhasil terhubung ke $ssid");
+        setState(() {
+          _wifiSetupStatusText = "✅ Terhubung ke \"$ssid\"";
+          _wifiSetupStatusIsError = false;
+          _wifiSetupDeviceId = newDeviceId ?? activeCooler?.id;
+        });
         Navigator.pop(context);
         // Cooler ini sekarang resmi jadi mode WiFi -> catat/​perbarui di daftar
         // supaya lain kali app tahu harus connect lewat WiFi lokal, bukan BLE.
@@ -1232,14 +1246,27 @@ class _ControllerPageState extends State<ControllerPage> {
             });
             _savePairedCoolers();
             _showSnack("⚠️ WiFi gagal connect, ESP32 balik ke mode Bluetooth");
+            setState(() {
+              _wifiSetupStatusText = "❌ Gagal terhubung ke WiFi, kembali ke Bluetooth";
+              _wifiSetupStatusIsError = true;
+              _wifiSetupDeviceId = null;
+            });
             scanBLE();
           }
         });
       } else {
         _showSnack("❌ Gagal terhubung, coba lagi");
+        setState(() {
+          _wifiSetupStatusText = "❌ Gagal terhubung, coba lagi";
+          _wifiSetupStatusIsError = true;
+        });
       }
     } catch (e) {
       _showSnack("⚠️ Pastikan HP terhubung ke ESP32-Config");
+      setState(() {
+        _wifiSetupStatusText = "⚠️ Gagal terhubung, pastikan HP terhubung ke ESP32-Config";
+        _wifiSetupStatusIsError = true;
+      });
     }
   }
 
@@ -1686,6 +1713,7 @@ class _ControllerPageState extends State<ControllerPage> {
   void showAddCoolerDialog() {
     final nicknameController = TextEditingController();
     final manualIdController = TextEditingController();
+    final manualIpController = TextEditingController();
     int tab = 0; // 0 = Bluetooth, 1 = Manual (WiFi)
     bool scanStarted = false;
     showDialog(
@@ -1804,6 +1832,20 @@ class _ControllerPageState extends State<ControllerPage> {
                           enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
                         ),
                       ),
+                      SizedBox(height: 10),
+                      TextField(
+                        controller: manualIpController,
+                        style: TextStyle(color: Colors.white),
+                        keyboardType: TextInputType.numberWithOptions(decimal: true),
+                        decoration: InputDecoration(
+                          labelText: "Alamat IP (opsional, mis. 192.168.1.42)",
+                          labelStyle: TextStyle(color: Colors.white54),
+                          enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+                          helperText: "Kosongkan saja kalau mau dicari otomatis lewat jaringan WiFi",
+                          helperStyle: TextStyle(color: Colors.white38, fontSize: 11),
+                          helperMaxLines: 2,
+                        ),
+                      ),
                     ],
                   ],
                 ),
@@ -1822,10 +1864,16 @@ class _ControllerPageState extends State<ControllerPage> {
                       _showSnack("Masukkan ID Perangkat dulu!");
                       return;
                     }
+                    final manualIp = manualIpController.text.trim();
                     String nickname =
                         nicknameController.text.trim().isEmpty ? "Cooler $id" : nicknameController.text.trim();
                     Navigator.pop(ctx);
-                    addCooler(Cooler(id: id, nickname: nickname, mode: "WiFi"));
+                    addCooler(Cooler(
+                      id: id,
+                      nickname: nickname,
+                      mode: "WiFi",
+                      lastIp: manualIp.isEmpty ? null : manualIp,
+                    ));
                   },
                   child: Text("Tambah", style: TextStyle(color: accentColor)),
                 ),
@@ -1938,16 +1986,76 @@ class _ControllerPageState extends State<ControllerPage> {
                 }
               },
             ),
-            if (activeCooler?.mode == "WiFi")
-              ListTile(
-                leading: Icon(Icons.bluetooth_rounded, color: AppColors.textFaint(isDark)),
-                title: Text("Kembali ke Mode Bluetooth", style: TextStyle(color: AppColors.text(isDark))),
-                subtitle: Text("Matikan WiFi di ESP32, pakai Bluetooth lagi", style: TextStyle(color: AppColors.textFaint(isDark), fontSize: 10)),
-                onTap: () {
-                  Navigator.pop(context);
-                  switchToBleMode();
-                },
+            // Status persisten hasil setup WiFi terakhir (berhasil/gagal), plus
+            // ID Perangkat kalau berhasil - tampil di sini terus sampai ada
+            // percobaan setup baru, tidak cuma sekilas lewat toast.
+            if (_wifiSetupStatusText != null)
+              Padding(
+                padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _wifiSetupStatusText!,
+                      style: TextStyle(
+                        color: _wifiSetupStatusIsError ? Colors.redAccent : Colors.greenAccent,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (_wifiSetupDeviceId != null)
+                      Padding(
+                        padding: EdgeInsets.only(top: 2),
+                        child: Text(
+                          "ID Perangkat: ${_wifiSetupDeviceId!}",
+                          style: TextStyle(color: AppColors.textFaint(isDark), fontSize: 11, letterSpacing: 1),
+                        ),
+                      ),
+                  ],
+                ),
               ),
+            // Switch manual buat pindah WiFi <-> Bluetooth - otomatis eksklusif
+            // karena Cooler.mode cuma bisa salah satu ("WiFi" atau "Bluetooth"),
+            // jadi menyalakan salah satu otomatis mematikan yang lain.
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: Row(
+                children: [
+                  Icon(
+                    activeCooler?.mode == "WiFi" ? Icons.wifi_rounded : Icons.bluetooth_rounded,
+                    color: AppColors.textFaint(isDark),
+                    size: 20,
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      activeCooler == null
+                          ? "Pilih cooler dulu"
+                          : (activeCooler!.mode == "WiFi" ? "Mode aktif: WiFi" : "Mode aktif: Bluetooth"),
+                      style: TextStyle(color: AppColors.text(isDark), fontSize: 13),
+                    ),
+                  ),
+                  Switch(
+                    value: activeCooler?.mode == "WiFi",
+                    activeColor: accentColor,
+                    onChanged: activeCooler == null
+                        ? null
+                        : (val) {
+                            Navigator.pop(context);
+                            if (val) {
+                              if (bleConnected) {
+                                switchToWifiSetup();
+                              } else {
+                                showWiFiSetupDialog();
+                              }
+                            } else {
+                              switchToBleMode();
+                            }
+                          },
+                  ),
+                ],
+              ),
+            ),
             Divider(color: AppColors.divider(isDark)),
             _drawerSectionTitle("Data & Otomasi"),
             ListTile(
