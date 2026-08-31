@@ -857,6 +857,7 @@ class _ControllerPageState extends State<ControllerPage> {
         if (_consecutiveWifiPollFailures >= 2) {
           setState(() => status = "🔴 Offline");
         }
+        _maybeFallbackToBleAfterProlongedWifiFailure();
       }
     } catch (e) {
       _consecutiveWifiPollFailures++;
@@ -866,6 +867,27 @@ class _ControllerPageState extends State<ControllerPage> {
           HistoryService.recordStatus(coolerId: activeCooler!.id, online: false, voltage: setVolt);
         }
       }
+      _maybeFallbackToBleAfterProlongedWifiFailure();
+    }
+  }
+
+  // Kalau WiFi gagal terus-menerus selama pemakaian normal (bukan cuma
+  // sesaat setelah setup), device kemungkinan sudah di-restart sendiri oleh
+  // firmware balik ke mode Bluetooth (lihat startWifiControlMode di
+  // firmware) - tapi app tidak akan tahu itu kecuali kita cek juga di sini.
+  // Threshold 10 gagal berturut (~30 detik pada interval poll 3 detik)
+  // dipilih supaya lebih lama dari jendela pemulihan firmware sendiri
+  // (20 detik), jadi app tidak buru-buru pindah mode saat firmware masih
+  // dalam proses reconnect.
+  void _maybeFallbackToBleAfterProlongedWifiFailure() {
+    if (_consecutiveWifiPollFailures == 10 && activeCooler?.mode == "WiFi") {
+      _stopLocalWifi();
+      setState(() {
+        activeCooler!.mode = "Bluetooth";
+      });
+      _savePairedCoolers();
+      _showSnack("⚠️ WiFi terputus terlalu lama, mencoba balik ke Bluetooth...");
+      scanBLE();
     }
   }
 
