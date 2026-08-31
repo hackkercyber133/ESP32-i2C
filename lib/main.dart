@@ -492,10 +492,11 @@ class _ControllerPageState extends State<ControllerPage> {
   static const int kUdpBeaconPort = 47269;
 
   // Status setup WiFi terakhir (ditampilkan persist di drawer, bukan cuma toast
-  // yang cepat hilang) - diisi oleh connectWiFi() saat berhasil/gagal.
+  // yang cepat hilang) - diisi saat pindah mode Bluetooth atau saat polling
+  // status WiFi mendeteksi perubahan.
   String? _wifiSetupStatusText;
   bool _wifiSetupStatusIsError = false;
-  String? _wifiSetupDeviceId; // ID Perangkat yang berhasil terhubung, ditampilkan di bawah "Setup WiFi ESP32"
+  String? _wifiSetupDeviceId; // ID Perangkat yang berhasil terhubung, ditampilkan di drawer
   bool _wifiSetupSawOnline = false; // true kalau device SUDAH PERNAH kekonfirmasi online sejak setup WiFi terakhir - dipakai supaya 1 poll yang gagal sesaat tidak dianggap "gagal total" dan memicu revert balik ke Bluetooth secara keliru.
 
   // ===== BLUETOOTH =====
@@ -519,12 +520,6 @@ class _ControllerPageState extends State<ControllerPage> {
   bool ch224aReady = false;
   bool powerGood = false;
   String pdStatus = "CH224A_NOT_READY";
-
-  // ===== WIFI SETUP =====
-  List<Map<String, dynamic>> wifiList = [];
-  bool isScanningWifi = false;
-  String selectedSSID = "";
-  TextEditingController passwordController = TextEditingController();
 
   // ===== JADWAL OTOMATIS & DETEKSI OFFLINE =====
   List<ScheduleRule> _schedules = [];
@@ -960,19 +955,6 @@ class _ControllerPageState extends State<ControllerPage> {
     }
   }
 
-  // Suruh ESP32 (yang sedang di mode Bluetooth) menyalakan hotspot
-  // "ESP32-Config" supaya bisa disetel WiFi rumah lewat dialog yang sudah ada.
-  void switchToWifiSetup() async {
-    if (!bleConnected) {
-      _showSnack("⚠️ Sambungkan lewat Bluetooth dulu untuk setup WiFi");
-      return;
-    }
-    await sendBLERaw({"action": "start_wifi_setup"});
-    _showSnack("📶 Hotspot \"ESP32-Config\" sedang dinyalakan di ESP32...");
-    await Future.delayed(Duration(seconds: 2));
-    showWiFiSetupDialog();
-  }
-
   // ===== BLUETOOTH =====
   void scanBLE({VoidCallback? onUpdate}) async {
     setState(() {
@@ -1194,125 +1176,6 @@ class _ControllerPageState extends State<ControllerPage> {
     }
   }
 
-  // ===== WIFI SETUP =====
-  Future<void> scanWiFi() async {
-    setState(() {
-      isScanningWifi = true;
-      wifiList.clear();
-    });
-    try {
-      var response =
-          await http.get(Uri.parse("http://192.168.4.1/scanwifi")).timeout(Duration(seconds: 5));
-      if (response.statusCode == 200) {
-        if (response.body.contains("scanning")) {
-          await Future.delayed(Duration(seconds: 3));
-          await scanWiFi();
-          return;
-        }
-        List<dynamic> data = jsonDecode(response.body);
-        setState(() {
-          wifiList = data.map((e) => {"ssid": e['ssid'], "rssi": e['rssi']}).toList();
-          isScanningWifi = false;
-        });
-      }
-    } catch (e) {
-      setState(() {
-        isScanningWifi = false;
-      });
-      _showSnack("⚠️ Pastikan HP terhubung ke ESP32-Config");
-    }
-  }
-
-  Future<void> connectWiFi(String ssid, String password) async {
-    if (activeCooler?.httpAuthPass == null) {
-      _showSnack("⏳ Menunggu data device dari Bluetooth, coba lagi sebentar...");
-      return;
-    }
-    try {
-      // Pakai Uri.http(...) dengan Map query parameters supaya ssid/password
-      // otomatis di-encode dengan benar (sebelumnya string mentah disambung
-      // langsung, jadi rusak kalau ssid/password ada spasi atau karakter
-      // spesial seperti & + # %).
-      var url = Uri.http("192.168.4.1", "/setwifi", {"ssid": ssid, "password": password});
-      var response = await http.post(url, headers: esp32AuthHeaders(activeCooler)).timeout(Duration(seconds: 8));
-      if (response.statusCode == 200) {
-        String? newDeviceId;
-        try {
-          final data = jsonDecode(response.body);
-          newDeviceId = data['deviceId'] as String?;
-        } catch (e) {
-          // Firmware lama tanpa deviceId di respons -> tetap lanjut pakai activeCooler saat ini (kalau ada).
-        }
-        _showSnack("✅ ESP32 berhasil terhubung ke $ssid");
-        setState(() {
-          _wifiSetupStatusText = "✅ Terhubung ke \"$ssid\"";
-          _wifiSetupStatusIsError = false;
-          _wifiSetupDeviceId = newDeviceId ?? activeCooler?.id;
-        });
-        Navigator.pop(context);
-        // Cooler ini sekarang resmi jadi mode WiFi -> catat/​perbarui di daftar
-        // supaya lain kali app tahu harus connect lewat WiFi lokal, bukan BLE.
-        final id = newDeviceId ?? activeCooler?.id;
-        if (id != null) {
-          final existing = pairedCoolers.where((c) => c.id == id).toList();
-          if (existing.isNotEmpty) {
-            existing.first.mode = "WiFi";
-          } else {
-            addCooler(Cooler(id: id, nickname: "Cooler $id", mode: "WiFi"));
-            return; // addCooler() sudah otomatis _connectActiveCooler()
-          }
-          setState(() => activeCooler = existing.first);
-          await _savePairedCoolers();
-        }
-        await Future.delayed(Duration(seconds: 5));
-        _wifiSetupSawOnline = false;
-        connectLocalWifi();
-        // Firmware sendiri akan coba connect ke WiFi rumah maks. 15 detik,
-        // lalu kalau gagal (SSID/password salah, sinyal lemah, dll) otomatis
-        // restart balik ke mode Bluetooth. Supaya app tidak nyangkut nunggu
-        // WiFi yang sudah menyerah, kita kasih jendela ~25 detik total sejak
-        // kredensial dikirim (5 detik jeda di atas + 20 detik ini) — kalau
-        // masih belum online, asumsikan firmware sudah balik ke BLE, jadi
-        // app ikut balik ke mode Bluetooth otomatis.
-        final coolerIdAtSubmit = id ?? activeCooler?.id;
-        Future.delayed(Duration(seconds: 20), () {
-          if (!mounted) return;
-          // Pakai _wifiSetupSawOnline (pernah online sejak setup ini), BUKAN
-          // status snapshot sesaat - supaya 1 poll /status yang kebetulan
-          // gagal/telat persis di detik ke-20 tidak dianggap "gagal total"
-          // dan salah memicu revert balik ke Bluetooth padahal WiFi-nya
-          // sebenarnya sudah berhasil connect.
-          if (!_wifiSetupSawOnline && activeCooler?.id == coolerIdAtSubmit && activeCooler?.mode == "WiFi") {
-            _stopLocalWifi();
-            setState(() {
-              activeCooler!.mode = "Bluetooth";
-            });
-            _savePairedCoolers();
-            _showSnack("⚠️ WiFi gagal connect, ESP32 balik ke mode Bluetooth");
-            setState(() {
-              _wifiSetupStatusText = "❌ Gagal terhubung ke WiFi, kembali ke Bluetooth";
-              _wifiSetupStatusIsError = true;
-              _wifiSetupDeviceId = null;
-            });
-            scanBLE();
-          }
-        });
-      } else {
-        _showSnack("❌ Gagal terhubung, coba lagi");
-        setState(() {
-          _wifiSetupStatusText = "❌ Gagal terhubung, coba lagi";
-          _wifiSetupStatusIsError = true;
-        });
-      }
-    } catch (e) {
-      _showSnack("⚠️ Pastikan HP terhubung ke ESP32-Config");
-      setState(() {
-        _wifiSetupStatusText = "⚠️ Gagal terhubung, pastikan HP terhubung ke ESP32-Config";
-        _wifiSetupStatusIsError = true;
-      });
-    }
-  }
-
   OverlayEntry? _activeToastEntry;
 
   void _showSnack(String text) {
@@ -1464,10 +1327,7 @@ class _ControllerPageState extends State<ControllerPage> {
   // ===== CACHE =====
   void clearAppCache() {
     setState(() {
-      wifiList.clear();
       scanResults.clear();
-      selectedSSID = "";
-      passwordController.clear();
     });
     Navigator.of(context, rootNavigator: true).pop();
     _showSnack("🧹 Cache aplikasi berhasil dibersihkan");
@@ -1494,133 +1354,6 @@ class _ControllerPageState extends State<ControllerPage> {
 
   Future<void> sendBLERaw(Map<String, dynamic> payload) async {
     await _writeControlBLE(payload);
-  }
-
-  // ===== DIALOG: SETUP WIFI =====
-  void showWiFiSetupDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setStateDialog) {
-          return AlertDialog(
-            backgroundColor: Color(0xFF11161f),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            title: Row(
-              children: [
-                Icon(Icons.wifi, color: accentColor),
-                SizedBox(width: 8),
-                Expanded(
-                    child: Text("Hubungkan Internet ESP32",
-                        style: TextStyle(color: Colors.white, fontSize: 16))),
-              ],
-            ),
-            content: SizedBox(
-              width: double.maxFinite,
-              height: 380,
-              child: Column(
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text("📶 WiFi di sekitar",
-                            style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white70)),
-                      ),
-                      IconButton(
-                        icon: Icon(Icons.refresh, color: accentColor),
-                        onPressed: () => scanWiFi(),
-                      ),
-                    ],
-                  ),
-                  Expanded(
-                    child: isScanningWifi
-                        ? Center(child: CircularProgressIndicator(color: accentColor))
-                        : wifiList.isEmpty
-                            ? Center(
-                                child: Text(
-                                    "Tidak ada WiFi ditemukan\nPastikan HP terhubung ke ESP32-Config",
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(color: Colors.white54)))
-                            : ListView.builder(
-                                itemCount: wifiList.length,
-                                itemBuilder: (ctx, index) {
-                                  var wifi = wifiList[index];
-                                  bool isSelected = selectedSSID == wifi['ssid'];
-                                  return Card(
-                                    color: isSelected ? accentColor.withOpacity(0.15) : Colors.grey.shade900,
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius: BorderRadius.circular(10),
-                                      side: BorderSide(
-                                          color: isSelected ? accentColor : Colors.transparent, width: 1.4),
-                                    ),
-                                    child: ListTile(
-                                      leading: Icon(Icons.wifi, color: accentColor),
-                                      title: Text(wifi['ssid'], style: TextStyle(color: Colors.white)),
-                                      trailing:
-                                          Text("${wifi['rssi']}dBm", style: TextStyle(color: Colors.grey)),
-                                      onTap: () {
-                                        setStateDialog(() {
-                                          selectedSSID = wifi['ssid'];
-                                        });
-                                      },
-                                    ),
-                                  );
-                                },
-                              ),
-                  ),
-                  if (selectedSSID.isNotEmpty) ...[
-                    Divider(color: Colors.white24),
-                    TextField(
-                      controller: passwordController,
-                      style: TextStyle(color: Colors.white),
-                      decoration: InputDecoration(
-                        labelText: "Password WiFi",
-                        labelStyle: TextStyle(color: Colors.white54),
-                        enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10),
-                            borderSide: BorderSide(color: Colors.white24)),
-                        focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10),
-                            borderSide: BorderSide(color: accentColor)),
-                      ),
-                      obscureText: true,
-                    ),
-                    SizedBox(height: 10),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        onPressed: () {
-                          if (passwordController.text.isNotEmpty) {
-                            connectWiFi(selectedSSID, passwordController.text);
-                          } else {
-                            _showSnack("Masukkan password!");
-                          }
-                        },
-                        child: Text("🔗 Hubungkan"),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: accentColor,
-                          foregroundColor: Colors.black,
-                          padding: EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        ),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: Text("Tutup", style: TextStyle(color: accentColor)),
-              ),
-            ],
-          );
-        },
-      ),
-    );
   }
 
   // ===== DIALOG: ABOUT / CHANGELOG =====
@@ -1669,41 +1402,44 @@ class _ControllerPageState extends State<ControllerPage> {
                     "1. Pastikan modul ESP32-C3 sudah terpasang & menyala (lampu indikator hidup).\n"
                     "2. Buka aplikasi ini, lalu izinkan permission Bluetooth & Lokasi saat diminta (wajib supaya fitur scan Bluetooth berfungsi)."),
                 SizedBox(height: 8),
-                Text("B. Menghubungkan ESP32 ke WiFi Rumah (sekali saja)",
+                Text("B. Menghubungkan ESP32 ke WiFi Rumah (sekali saja, langsung lewat browser)",
                     style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
                 SizedBox(height: 2),
                 Text(
-                    "3. Kalau ESP32 belum pernah disetel WiFi, dia otomatis memancarkan hotspot bernama \"ESP32-Config\" (password: 12345678). Sambungkan WiFi HP ke hotspot itu dulu.\n"
-                    "4. Di aplikasi, buka menu ☰ (kanan atas / drawer) → \"Setup WiFi ESP32\".\n"
-                    "5. Tekan ikon refresh untuk scan WiFi sekitar, pilih nama WiFi rumah dari daftar, masukkan passwordnya, lalu tekan \"🔗 Hubungkan\".\n"
-                    "6. Tunggu notifikasi berhasil terhubung. ESP32 akan restart & tersambung ke WiFi rumah, status akan berubah jadi \"🟢 Online\"."),
+                    "3. Kalau ESP32 belum pernah disetel WiFi (atau kamu tekan & tahan tombol BOOT di board saat menyalakannya), dia otomatis memancarkan hotspot bernama \"ESP32-Config\" (password: 12345678).\n"
+                    "4. Sambungkan WiFi HP ke hotspot \"ESP32-Config\" itu (bukan lewat aplikasi ini).\n"
+                    "5. Buka Chrome (atau browser lain) di HP, ketik alamat: 192.168.4.1 lalu buka.\n"
+                    "6. Di halaman yang muncul, catat \"Device ID\" yang tertera, tekan \"🔍 Cari WiFi Sekitar\", pilih nama WiFi rumah dari daftar (atau ketik manual), isi passwordnya, lalu tekan \"🔗 Hubungkan\".\n"
+                    "7. Tunggu sekitar 15 detik, ESP32 akan restart & mencoba tersambung ke WiFi rumah."),
                 SizedBox(height: 8),
                 Text("C. Menambahkan Cooler ke Aplikasi",
                     style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
                 SizedBox(height: 2),
                 Text(
-                    "7. Buka menu ☰ → \"Tambah Cooler Baru\".\n"
-                    "8. Isi nama cooler (bebas, mis. \"Cooler Kamar\").\n"
-                    "9. Pilih salah satu cara pairing:\n"
-                    "   • Scan Bluetooth: tunggu daftar perangkat muncul, ketuk perangkat yang sesuai.\n"
-                    "   • Manual (WiFi): masukkan ID Perangkat (dilihat di layar Setup WiFi ESP32 / serial monitor), lalu tekan \"Tambah\".\n"
-                    "10. Cooler yang baru ditambahkan otomatis jadi cooler aktif (bisa dicek/diganti lewat menu ☰ → \"Cooler Saya\")."),
+                    "8. Sambungkan lagi WiFi HP ke jaringan rumah yang sama dengan ESP32 (bukan ESP32-Config lagi).\n"
+                    "9. Buka aplikasi ini, lalu menu ☰ → \"Tambah Cooler Baru\".\n"
+                    "10. Isi nama cooler (bebas, mis. \"Cooler Kamar\").\n"
+                    "11. Pilih salah satu cara pairing:\n"
+                    "   • Scan Bluetooth: tunggu daftar perangkat muncul, ketuk perangkat yang sesuai (hanya berfungsi kalau ESP32 sedang mode Bluetooth/AP config, belum tersambung WiFi rumah).\n"
+                    "   • Manual (WiFi): masukkan Device ID yang dicatat di langkah 6 tadi, lalu tekan \"Tambah\".\n"
+                    "12. Cooler yang baru ditambahkan otomatis jadi cooler aktif, status akan berubah \"🟢 Online\" (bisa dicek/diganti lewat menu ☰ → \"Cooler Saya\").\n\n"
+                    "Catatan: kalau nanti mau ganti WiFi ESP32 ke jaringan lain, tekan & tahan tombol BOOT di board saat menyalakan ulang ESP32 untuk kembali ke hotspot \"ESP32-Config\", lalu ulangi langkah B."),
                 SizedBox(height: 8),
                 Text("D. Mengatur Voltase Kipas",
                     style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
                 SizedBox(height: 2),
                 Text(
-                    "11. Pastikan status di atas menunjukkan \"🟢 Online\" (cooler sudah terhubung).\n"
-                    "12. Di halaman utama, pilih salah satu preset tegangan: 5V / 9V / 12V / 15V.\n"
-                    "13. Tekan tombol \"Pilih\" pada preset yang diinginkan — tombol akan berubah jadi \"Terpilih\" dan kipas akan menyesuaikan tegangan.\n"
-                    "14. Selesai — kipas kini berjalan sesuai voltase yang dipilih."),
+                    "13. Pastikan status di atas menunjukkan \"🟢 Online\" (cooler sudah terhubung).\n"
+                    "14. Di halaman utama, pilih salah satu preset tegangan: 5V / 9V / 12V / 15V.\n"
+                    "15. Tekan tombol \"Pilih\" pada preset yang diinginkan — tombol akan berubah jadi \"Terpilih\" dan kipas akan menyesuaikan tegangan.\n"
+                    "16. Selesai — kipas kini berjalan sesuai voltase yang dipilih."),
                 SizedBox(height: 8),
                 Text("E. Fitur Tambahan (opsional)",
                     style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
                 SizedBox(height: 2),
                 Text(
                     "• Ganti warna tema aplikasi lewat menu ☰ → \"Tampilan\".\n"
-                    "• \"Bersihkan Cache Aplikasi\" untuk menghapus data scan WiFi/Bluetooth sementara.\n"
+                    "• \"Bersihkan Cache Aplikasi\" untuk menghapus data scan Bluetooth sementara.\n"
                     "• \"Bersihkan Cache Modul ESP32\" untuk kirim perintah reset cache ke ESP32.\n"
                     "• Bisa menambahkan & berpindah antar beberapa cooler lewat menu ☰ → \"Cooler Saya\"."),
                 Divider(color: Colors.white24, height: 20),
@@ -1751,7 +1487,7 @@ class _ControllerPageState extends State<ControllerPage> {
   // ===== DRAWER (MENU GARIS 3) =====
   // ===== DIALOG: TAMBAH COOLER BARU =====
   // Dua cara: (1) scan Bluetooth lalu pilih unit fisik yang mau dipasangkan,
-  // atau (2) masukkan manual ID cooler (dari layar Setup WiFi ESP32 / serial
+  // atau (2) masukkan manual ID cooler (dari halaman setup 192.168.4.1 / serial
   // monitor) untuk dikontrol lewat WiFi lokal (HTTP + UDP discovery).
   void showAddCoolerDialog() {
     final nicknameController = TextEditingController();
@@ -1861,7 +1597,7 @@ class _ControllerPageState extends State<ControllerPage> {
                       ),
                     ] else ...[
                       Text(
-                        "Buka menu \"Setup WiFi ESP32\" atau layar konfigurasi cooler (192.168.4.1) untuk melihat ID Perangkat-nya, lalu masukkan di sini.",
+                        "Device ID bisa dilihat di halaman setup ESP32 (buka browser ke 192.168.4.1 saat HP terhubung ke hotspot \"ESP32-Config\") atau di serial monitor, lalu masukkan di sini.",
                         style: TextStyle(color: Colors.white38, fontSize: 12),
                       ),
                       SizedBox(height: 10),
@@ -2014,21 +1750,6 @@ class _ControllerPageState extends State<ControllerPage> {
                 ),
               ),
             ),
-            ListTile(
-              leading: Icon(Icons.settings_ethernet, color: AppColors.textFaint(isDark)),
-              title: Text("Setup WiFi ESP32", style: TextStyle(color: AppColors.text(isDark))),
-              subtitle: bleConnected
-                  ? Text("Menyalakan hotspot ESP32-Config otomatis", style: TextStyle(color: AppColors.textFaint(isDark), fontSize: 10))
-                  : null,
-              onTap: () {
-                Navigator.pop(context);
-                if (bleConnected) {
-                  switchToWifiSetup();
-                } else {
-                  showWiFiSetupDialog();
-                }
-              },
-            ),
             // Status persisten hasil setup WiFi terakhir (berhasil/gagal), plus
             // ID Perangkat kalau berhasil - tampil di sini terus sampai ada
             // percobaan setup baru, tidak cuma sekilas lewat toast.
@@ -2086,11 +1807,7 @@ class _ControllerPageState extends State<ControllerPage> {
                         : (val) {
                             Navigator.pop(context);
                             if (val) {
-                              if (bleConnected) {
-                                switchToWifiSetup();
-                              } else {
-                                showWiFiSetupDialog();
-                              }
+                              _showSnack("📶 Setup WiFi sekarang lewat browser, lihat menu About untuk caranya");
                             } else {
                               switchToBleMode();
                             }
@@ -2621,8 +2338,6 @@ class _ControllerPageState extends State<ControllerPage> {
 
   Widget _nexusConnectionActions(bool isDark) => Row(children: [
     Expanded(child: OutlinedButton.icon(onPressed: () { if (activeCooler == null) showAddCoolerDialog(); else _connectActiveCooler(); }, icon: Icon(Icons.sync_rounded, color: accentColor), label: Text('REFRESH', style: TextStyle(color: accentColor, fontSize: 10, fontWeight: FontWeight.w900)), style: OutlinedButton.styleFrom(side: BorderSide(color: accentColor.withOpacity(.4)), padding: const EdgeInsets.symmetric(vertical: 14)))),
-    const SizedBox(width: 10),
-    Expanded(child: OutlinedButton.icon(onPressed: switchToWifiSetup, icon: Icon(Icons.wifi_tethering_rounded, color: accentColor), label: Text('SETUP WIFI', style: TextStyle(color: accentColor, fontSize: 10, fontWeight: FontWeight.w900)), style: OutlinedButton.styleFrom(side: BorderSide(color: accentColor.withOpacity(.4)), padding: const EdgeInsets.symmetric(vertical: 14)))),
   ]);
 
   Widget _nexusSectionTitle(bool isDark, String title, String subtitle) => Row(children: [
