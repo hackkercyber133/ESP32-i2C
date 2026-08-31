@@ -380,6 +380,13 @@ String buildStatusJson(bool includeSecret) {
   doc["ch224aReady"] = ch224aReady;
   doc["fanSpeed"] = fanSpeedPercent;
   doc["fanRpm"] = fanRpm;
+  doc["netMode"] = netMode;
+  doc["configApActive"] = configApActive;
+  doc["wifiConnected"] = wifiControlActive;
+  if (wifiControlActive) {
+    doc["ssid"] = WiFi.SSID();
+    doc["ip"] = WiFi.localIP().toString();
+  }
 
   if (includeSecret) doc["httpAuthPass"] = httpAuthPass;
   String jsonStr;
@@ -437,7 +444,14 @@ void handleScanWifi() {
 }
 
 void handleSetWifi() {
-  if (!checkHttpAuth()) return;
+  // Saat sedang mode AP config ("ESP32-Config"), tidak perlu HTTP auth lagi -
+  // akses ke sini sudah otomatis terbatas cuma untuk HP yang tahu password
+  // hotspot-nya. Ini yang memungkinkan setup WiFi langsung lewat browser
+  // (buka alamat IP ESP32) tanpa perlu buka aplikasi/BLE sama sekali.
+  // Kalau dipanggil saat ESP32 sudah tersambung ke WiFi rumah (bukan lagi di
+  // mode AP config), tetap wajib HTTP auth supaya orang lain di jaringan yang
+  // sama tidak bisa diam-diam mengganti WiFi ESP32.
+  if (!configApActive && !checkHttpAuth()) return;
   if (!server.hasArg("ssid") || !server.hasArg("password")) {
     server.send(400, "text/plain", "missing ssid/password");
     return;
@@ -456,6 +470,153 @@ void handleSetWifi() {
   Serial.println("Kredensial WiFi disimpan (" + ssid + "), restart untuk masuk mode WiFi...");
   delay(400);
   ESP.restart();
+}
+
+static const char SETUP_PAGE_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Setup WiFi ESP32 Cooler</title>
+<style>
+  :root{--bg:#05050f;--card:#10122a;--accent:#3ee6c4;--accent2:#5b8cff;--text:#eef0ff;--faint:#8b8fb8;--danger:#ff6b6b;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:linear-gradient(160deg,#05050f,#0a0d24 60%,#05050f);color:var(--text);
+       font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:20px;min-height:100vh;}
+  .card{background:var(--card);border:1px solid #23264d;border-radius:16px;padding:20px;margin-bottom:16px;
+        box-shadow:0 8px 24px rgba(0,0,0,.35);}
+  h1{font-size:19px;margin:0 0 4px;background:linear-gradient(90deg,var(--accent),var(--accent2));
+     -webkit-background-clip:text;background-clip:text;color:transparent;}
+  p.sub{color:var(--faint);font-size:12px;margin:0 0 18px;}
+  .row{display:flex;align-items:center;justify-content:space-between;padding:6px 0;font-size:13px;}
+  .row .k{color:var(--faint);}
+  .row .v{font-weight:700;letter-spacing:.5px;}
+  button{width:100%;padding:14px;border-radius:12px;border:none;font-size:14px;font-weight:800;
+         letter-spacing:.5px;cursor:pointer;margin-top:6px;}
+  .btn-primary{background:linear-gradient(90deg,var(--accent),var(--accent2));color:#04101a;}
+  .btn-outline{background:transparent;border:1px solid #33375f;color:var(--text);}
+  input{width:100%;padding:13px;border-radius:12px;border:1px solid #2a2e58;background:#0b0d24;
+        color:var(--text);font-size:14px;margin-top:10px;}
+  input:focus{outline:none;border-color:var(--accent);}
+  #wifiList{margin-top:12px;}
+  .wifi-item{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;
+             background:#0b0d24;border:1px solid #23264d;border-radius:10px;margin-bottom:8px;cursor:pointer;}
+  .wifi-item:active{border-color:var(--accent);}
+  .wifi-item .ssid{font-size:13px;}
+  .wifi-item .rssi{font-size:11px;color:var(--faint);}
+  #status{margin-top:14px;font-size:13px;line-height:1.5;min-height:18px;}
+  .ok{color:var(--accent);}
+  .err{color:var(--danger);}
+  .spin{display:inline-block;width:14px;height:14px;border:2px solid #33375f;border-top-color:var(--accent);
+        border-radius:50%;animation:sp .7s linear infinite;vertical-align:middle;margin-right:6px;}
+  @keyframes sp{to{transform:rotate(360deg);}}
+</style>
+</head>
+<body>
+
+  <div class="card">
+    <h1>⚙️ Setup WiFi ESP32 Cooler</h1>
+    <p class="sub">Dibuka langsung dari browser, tidak perlu aplikasi.</p>
+    <div class="row"><span class="k">Device ID</span><span class="v" id="deviceId">-</span></div>
+    <div class="row" id="rowNet" style="display:none;">
+      <span class="k">Status Jaringan</span><span class="v" id="netInfo">-</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <button class="btn-outline" onclick="scanWifi()">🔍 Cari WiFi Sekitar</button>
+    <div id="wifiList"></div>
+
+    <input type="text" id="ssid" placeholder="Nama WiFi (SSID)">
+    <input type="password" id="password" placeholder="Password WiFi">
+    <button class="btn-primary" onclick="connectWifi()">🔗 Hubungkan</button>
+    <div id="status"></div>
+  </div>
+
+<script>
+function setStatus(html, cls){
+  const el = document.getElementById('status');
+  el.innerHTML = html;
+  el.className = cls || '';
+}
+
+async function loadDeviceInfo(){
+  try{
+    const r = await fetch('/status');
+    const j = await r.json();
+    document.getElementById('deviceId').textContent = j.deviceId || '-';
+    if (j.wifiConnected){
+      document.getElementById('rowNet').style.display = 'flex';
+      document.getElementById('netInfo').textContent = (j.ssid || '-') + ' - ' + (j.ip || '-');
+    }
+  }catch(e){}
+}
+
+async function scanWifi(){
+  const list = document.getElementById('wifiList');
+  list.innerHTML = '<p style="color:#8b8fb8;font-size:12px;"><span class="spin"></span>Memindai jaringan...</p>';
+  try{
+    let networks = null;
+    for (let i = 0; i < 12; i++){
+      const r = await fetch('/scanwifi');
+      const ct = r.headers.get('content-type') || '';
+      if (ct.indexOf('application/json') !== -1){
+        networks = await r.json();
+        break;
+      }
+      await new Promise(res => setTimeout(res, 900));
+    }
+    if (!networks){
+      list.innerHTML = '<p style="color:#ff6b6b;font-size:12px;">Gagal memindai, coba lagi.</p>';
+      return;
+    }
+    if (networks.length === 0){
+      list.innerHTML = '<p style="color:#8b8fb8;font-size:12px;">Tidak ada WiFi ditemukan.</p>';
+      return;
+    }
+    networks.sort((a,b) => b.rssi - a.rssi);
+    list.innerHTML = '';
+    networks.forEach(n => {
+      const div = document.createElement('div');
+      div.className = 'wifi-item';
+      div.innerHTML = '<span class="ssid">📶 ' + n.ssid + '</span><span class="rssi">' + n.rssi + ' dBm</span>';
+      div.onclick = () => { document.getElementById('ssid').value = n.ssid; document.getElementById('password').focus(); };
+      list.appendChild(div);
+    });
+  }catch(e){
+    list.innerHTML = '<p style="color:#ff6b6b;font-size:12px;">Gagal memindai, coba lagi.</p>';
+  }
+}
+
+async function connectWifi(){
+  const ssid = document.getElementById('ssid').value.trim();
+  const password = document.getElementById('password').value;
+  if (!ssid){ setStatus('Isi nama WiFi dulu.', 'err'); return; }
+  setStatus('<span class="spin"></span>Menyimpan & menghubungkan...', '');
+  try{
+    const body = 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(password);
+    await fetch('/setwifi', {
+      method: 'POST',
+      headers: {'Content-Type':'application/x-www-form-urlencoded'},
+      body: body
+    });
+    setStatus('✅ Tersimpan! ESP32 sedang restart & mencoba konek ke WiFi rumah (kurang lebih 15 detik).<br>' +
+               'Sambungkan HP kembali ke WiFi rumah, lalu buka aplikasi, Tambah Cooler, tab Manual (WiFi), masukkan Device ID di atas.', 'ok');
+  }catch(e){
+    setStatus('✅ Perintah terkirim. ESP32 kemungkinan sudah restart untuk konek WiFi (koneksi ke halaman ini terputus, itu normal).<br>' +
+               'Sambungkan HP kembali ke WiFi rumah lalu buka aplikasi.', 'ok');
+  }
+}
+
+loadDeviceInfo();
+</script>
+</body>
+</html>
+)rawliteral";
+
+void handleRoot() {
+  server.send_P(200, "text/html", SETUP_PAGE_HTML);
 }
 
 void handleStatusHttp() {
@@ -487,6 +648,7 @@ void handleSwitchBle() {
 }
 
 void registerHttpHandlers() {
+  server.on("/", HTTP_GET, handleRoot);
   server.on("/scanwifi", HTTP_GET, handleScanWifi);
   server.on("/setwifi", HTTP_POST, handleSetWifi);
   server.on("/status", HTTP_GET, handleStatusHttp);
@@ -658,12 +820,13 @@ void setup() {
   if (netMode == "wifi" && savedSsid.length() > 0) {
     startWifiControlMode(savedSsid, savedPass);
   } else {
+    // AP config ("ESP32-Config") selalu dinyalakan di sini, terlepas dari
+    // ada/tidaknya SSID rumah yang tersimpan sebelumnya. Ini supaya halaman
+    // setup WiFi lewat browser (http://192.168.4.1) selalu bisa diakses
+    // langsung tanpa perlu buka aplikasi/BLE dulu - cukup tekan tombol BOOT
+    // saat menyalakan ESP32 untuk masuk ke mode ini kapan saja.
     startBleMode();
-    if (savedSsid.length() == 0) {
-      startConfigAP();
-    } else {
-      WiFi.mode(WIFI_OFF);
-    }
+    startConfigAP();
   }
 
   startMillis = millis();
