@@ -496,6 +496,7 @@ class _ControllerPageState extends State<ControllerPage> {
   String? _wifiSetupStatusText;
   bool _wifiSetupStatusIsError = false;
   String? _wifiSetupDeviceId; // ID Perangkat yang berhasil terhubung, ditampilkan di bawah "Setup WiFi ESP32"
+  bool _wifiSetupSawOnline = false; // true kalau device SUDAH PERNAH kekonfirmasi online sejak setup WiFi terakhir - dipakai supaya 1 poll yang gagal sesaat tidak dianggap "gagal total" dan memicu revert balik ke Bluetooth secara keliru.
 
   // ===== BLUETOOTH =====
   BluetoothDevice? bleDevice;
@@ -734,6 +735,7 @@ class _ControllerPageState extends State<ControllerPage> {
     }
     // Coba IP terakhir yang diketahui dulu (kalau ada) sambil menunggu beacon baru masuk.
     _wifiIp = activeCooler!.lastIp;
+    _consecutiveWifiPollFailures = 0;
     await _startUdpDiscovery();
     _wifiPollTimer?.cancel();
     _wifiPollTimer = Timer.periodic(Duration(seconds: 3), (_) => _pollWifiStatus());
@@ -825,6 +827,8 @@ class _ControllerPageState extends State<ControllerPage> {
     return Colors.redAccent;
   }
 
+  int _consecutiveWifiPollFailures = 0;
+
   Future<void> _pollWifiStatus() async {
     if (_wifiIp == null || activeCooler == null) {
       if (mounted) setState(() => status = "🔴 Offline");
@@ -836,20 +840,31 @@ class _ControllerPageState extends State<ControllerPage> {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         if (data['deviceId'] != null && data['deviceId'] != activeCooler?.id) return;
+        _consecutiveWifiPollFailures = 0;
         setState(() {
           status = "🟢 Online";
           _applyDeviceStatus(Map<String, dynamic>.from(data));
         });
+        _wifiSetupSawOnline = true;
         if (activeCooler != null) {
           HistoryService.recordStatus(coolerId: activeCooler!.id, online: true, voltage: setVolt);
         }
       } else {
-        setState(() => status = "🔴 Offline");
+        _consecutiveWifiPollFailures++;
+        // Baru dianggap offline kalau gagal 2x berturut-turut (>=6 detik
+        // tanpa respons) - 1 kali gagal sendirian biasanya cuma keterlambatan
+        // jaringan sesaat, bukan berarti device-nya beneran putus.
+        if (_consecutiveWifiPollFailures >= 2) {
+          setState(() => status = "🔴 Offline");
+        }
       }
     } catch (e) {
-      setState(() => status = "🔴 Offline");
-      if (activeCooler != null) {
-        HistoryService.recordStatus(coolerId: activeCooler!.id, online: false, voltage: setVolt);
+      _consecutiveWifiPollFailures++;
+      if (_consecutiveWifiPollFailures >= 2) {
+        setState(() => status = "🔴 Offline");
+        if (activeCooler != null) {
+          HistoryService.recordStatus(coolerId: activeCooler!.id, online: false, voltage: setVolt);
+        }
       }
     }
   }
@@ -1228,6 +1243,7 @@ class _ControllerPageState extends State<ControllerPage> {
           await _savePairedCoolers();
         }
         await Future.delayed(Duration(seconds: 5));
+        _wifiSetupSawOnline = false;
         connectLocalWifi();
         // Firmware sendiri akan coba connect ke WiFi rumah maks. 15 detik,
         // lalu kalau gagal (SSID/password salah, sinyal lemah, dll) otomatis
@@ -1239,7 +1255,12 @@ class _ControllerPageState extends State<ControllerPage> {
         final coolerIdAtSubmit = id ?? activeCooler?.id;
         Future.delayed(Duration(seconds: 20), () {
           if (!mounted) return;
-          if (status != "🟢 Online" && activeCooler?.id == coolerIdAtSubmit && activeCooler?.mode == "WiFi") {
+          // Pakai _wifiSetupSawOnline (pernah online sejak setup ini), BUKAN
+          // status snapshot sesaat - supaya 1 poll /status yang kebetulan
+          // gagal/telat persis di detik ke-20 tidak dianggap "gagal total"
+          // dan salah memicu revert balik ke Bluetooth padahal WiFi-nya
+          // sebenarnya sudah berhasil connect.
+          if (!_wifiSetupSawOnline && activeCooler?.id == coolerIdAtSubmit && activeCooler?.mode == "WiFi") {
             _stopLocalWifi();
             setState(() {
               activeCooler!.mode = "Bluetooth";
