@@ -1,3 +1,4 @@
+//VLADIMIR PUTIN//
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -444,13 +445,6 @@ void handleScanWifi() {
 }
 
 void handleSetWifi() {
-  // Saat sedang mode AP config ("ESP32-Config"), tidak perlu HTTP auth lagi -
-  // akses ke sini sudah otomatis terbatas cuma untuk HP yang tahu password
-  // hotspot-nya. Ini yang memungkinkan setup WiFi langsung lewat browser
-  // (buka alamat IP ESP32) tanpa perlu buka aplikasi/BLE sama sekali.
-  // Kalau dipanggil saat ESP32 sudah tersambung ke WiFi rumah (bukan lagi di
-  // mode AP config), tetap wajib HTTP auth supaya orang lain di jaringan yang
-  // sama tidak bisa diam-diam mengganti WiFi ESP32.
   if (!configApActive && !checkHttpAuth()) return;
   if (!server.hasArg("ssid") || !server.hasArg("password")) {
     server.send(400, "text/plain", "missing ssid/password");
@@ -478,7 +472,7 @@ static const char SETUP_PAGE_HTML[] PROGMEM = R"rawliteral(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Setup WiFi - Cooler Control Node</title>
+<title>Setup WiFi - Vladimir Putin</title>
 <style>
   :root{
     --bg:#05070c; --card:#0d1220; --border:#1c2436; --accent:#22d3ee; --accent2:#a78bfa;
@@ -721,11 +715,6 @@ void handleRoot() {
 
 void handleStatusHttp() {
   lastAppContact = millis();
-  // includeSecret hanya true kalau masih di mode AP config — akses ke sini
-  // sudah otomatis terbatas cuma untuk yang tahu password hotspot
-  // ESP32-Config, jadi aman ditampilkan di halaman setup browser. Begitu
-  // sudah pindah ke WiFi rumah, secret ini TIDAK PERNAH dikirim lewat HTTP
-  // lagi (harus lewat BLE yang terenkripsi).
   server.send(200, "application/json", buildStatusJson(configApActive));
 }
 
@@ -740,12 +729,6 @@ void handleSetCmd() {
   String cmd;
   serializeJson(doc, cmd);
   processCommandJson(cmd);
-  // Sebelumnya cuma balas "OK" (plain text) - app coba jsonDecode() itu di
-  // sisi Flutter, gagal parse (bukan JSON valid), exception-nya ditelan diam-
-  // diam, jadi tampilan voltase/fan di app BARU update pas siklus polling
-  // /status berikutnya (jeda hingga 3 detik). Balas status JSON lengkap di
-  // sini juga (sama seperti /status) supaya app langsung update seketika,
-  // sama responsifnya dengan mode BLE yang sudah notify instan.
   server.send(200, "application/json", buildStatusJson(false));
 }
 
@@ -884,13 +867,6 @@ void setup() {
   savedSsid = prefs.getString("ssid", "");
   savedPass = prefs.getString("pass", "");
   httpAuthPass = loadOrCreateHttpAuthPass();
-
-  // Tombol darurat: tahan tombol BOOT fisik di board sambil menyalakan/reset
-  // ESP32 untuk memaksa balik ke mode Bluetooth + AP config, walaupun
-  // sebelumnya tersimpan di mode WiFi. Ini jalan keluar kalau device
-  // kejebak di mode WiFi (mis. WiFi berhasil connect tapi app gagal sync)
-  // dan BLE/AP config jadi tidak bisa diakses sama sekali - tanpa ini,
-  // satu-satunya jalan keluar adalah erase flash total.
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
   if (digitalRead(BOOT_BTN_PIN) == LOW) {
     Serial.println("Tombol BOOT ditahan saat menyala - paksa balik ke mode Bluetooth + AP config.");
@@ -931,11 +907,6 @@ void setup() {
   if (netMode == "wifi" && savedSsid.length() > 0) {
     startWifiControlMode(savedSsid, savedPass);
   } else {
-    // AP config ("ESP32-Config") selalu dinyalakan di sini, terlepas dari
-    // ada/tidaknya SSID rumah yang tersimpan sebelumnya. Ini supaya halaman
-    // setup WiFi lewat browser (http://192.168.4.1) selalu bisa diakses
-    // langsung tanpa perlu buka aplikasi/BLE dulu - cukup tekan tombol BOOT
-    // saat menyalakan ESP32 untuk masuk ke mode ini kapan saja.
     startBleMode();
     startConfigAP();
   }
