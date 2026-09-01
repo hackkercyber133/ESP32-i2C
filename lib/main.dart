@@ -668,13 +668,25 @@ class _ControllerPageState extends State<ControllerPage> {
     }
   }
 
-  Future<void> _connectBleById(String? remoteId) async {
+  // Coba connect BLE beberapa kali (bukan sekali doang) - waktu boot ESP32
+  // abis restart (WiFi->BLE atau sebaliknya) itu variatif tergantung
+  // deteksi CH224A dll, jadi satu percobaan dengan delay tetap kadang
+  // kejadian ESP32-nya belum selesai mulai advertising. Retry beberapa
+  // kali dengan jeda mengatasi race condition ini.
+  Future<void> _connectBleById(String? remoteId, {int maxAttempts = 5}) async {
     if (remoteId == null) return;
-    try {
-      final device = BluetoothDevice.fromId(remoteId);
-      await connectBLE(device);
-    } catch (e) {
-      _showSnack("⚠️ Gagal konek ulang ke ${activeCooler?.nickname}, coba scan ulang");
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        final device = BluetoothDevice.fromId(remoteId);
+        await connectBLE(device);
+        if (bleConnected) return;
+      } catch (e) {}
+      if (attempt < maxAttempts) {
+        await Future.delayed(const Duration(seconds: 2));
+      }
+    }
+    if (!bleConnected) {
+      _showSnack("⚠️ Gagal konek ulang ke ${activeCooler?.nickname} setelah $maxAttempts percobaan, coba scan ulang");
     }
   }
 
