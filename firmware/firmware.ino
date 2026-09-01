@@ -519,6 +519,8 @@ static const char SETUP_PAGE_HTML[] PROGMEM = R"rawliteral(
     <h1>⚙️ Setup WiFi ESP32 Cooler</h1>
     <p class="sub">Dibuka langsung dari browser, tidak perlu aplikasi.</p>
     <div class="row"><span class="k">Device ID</span><span class="v" id="deviceId">-</span></div>
+    <div class="row"><span class="k">Password Kontrol</span><span class="v" id="authPass">-</span></div>
+    <p class="sub" style="margin:6px 0 0;">⬆️ Catat 2 nilai di atas. Kalau nanti nambah cooler ini lewat menu "Manual (WiFi)" di aplikasi, kamu perlu masukkan keduanya supaya bisa mengontrol (bukan cuma lihat status).</p>
     <div class="row" id="rowNet" style="display:none;">
       <span class="k">Status Jaringan</span><span class="v" id="netInfo">-</span>
     </div>
@@ -546,6 +548,7 @@ async function loadDeviceInfo(){
     const r = await fetch('/status');
     const j = await r.json();
     document.getElementById('deviceId').textContent = j.deviceId || '-';
+    document.getElementById('authPass').textContent = j.httpAuthPass || '-';
     if (j.wifiConnected){
       document.getElementById('rowNet').style.display = 'flex';
       document.getElementById('netInfo').textContent = (j.ssid || '-') + ' - ' + (j.ip || '-');
@@ -621,7 +624,12 @@ void handleRoot() {
 
 void handleStatusHttp() {
   lastAppContact = millis();
-  server.send(200, "application/json", buildStatusJson(false));
+  // includeSecret hanya true kalau masih di mode AP config — akses ke sini
+  // sudah otomatis terbatas cuma untuk yang tahu password hotspot
+  // ESP32-Config, jadi aman ditampilkan di halaman setup browser. Begitu
+  // sudah pindah ke WiFi rumah, secret ini TIDAK PERNAH dikirim lewat HTTP
+  // lagi (harus lewat BLE yang terenkripsi).
+  server.send(200, "application/json", buildStatusJson(configApActive));
 }
 
 void handleSetCmd() {
@@ -873,10 +881,7 @@ void loop() {
         wifiDownSince = millis();
         Serial.println("WiFi terputus, mencoba reconnect...");
         WiFi.reconnect();
-      } else if (millis() - wifiDownSince > 20000) {
-        // 20 detik nggak pulih-pulih — daripada device nyangkut mati total
-        // (WiFi mati, BLE juga sudah dimatikan sejak masuk mode WiFi),
-        // lebih baik balik bersih ke mode Bluetooth lewat restart.
+      } else if (millis() - wifiDownSince > 20000) {        
         Serial.println("WiFi tidak pulih dalam 20 detik, kembali ke mode Bluetooth...");
         prefs.putString("netMode", "ble");
         delay(300);
