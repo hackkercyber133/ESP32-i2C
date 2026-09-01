@@ -1493,6 +1493,7 @@ class _ControllerPageState extends State<ControllerPage> {
     final nicknameController = TextEditingController();
     final manualIdController = TextEditingController();
     final manualIpController = TextEditingController();
+    final manualAuthPassController = TextEditingController();
     int tab = 0; // 0 = Bluetooth, 1 = Manual (WiFi)
     bool scanStarted = false;
     showDialog(
@@ -1625,6 +1626,19 @@ class _ControllerPageState extends State<ControllerPage> {
                           helperMaxLines: 2,
                         ),
                       ),
+                      SizedBox(height: 10),
+                      TextField(
+                        controller: manualAuthPassController,
+                        style: TextStyle(color: Colors.white, letterSpacing: 1),
+                        decoration: InputDecoration(
+                          labelText: "Password Kontrol (dari halaman setup 192.168.4.1)",
+                          labelStyle: TextStyle(color: Colors.white54),
+                          enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+                          helperText: "Wajib diisi supaya bisa mengontrol, bukan cuma lihat status",
+                          helperStyle: TextStyle(color: Colors.white38, fontSize: 11),
+                          helperMaxLines: 2,
+                        ),
+                      ),
                     ],
                   ],
                 ),
@@ -1644,6 +1658,7 @@ class _ControllerPageState extends State<ControllerPage> {
                       return;
                     }
                     final manualIp = manualIpController.text.trim();
+                    final manualAuthPass = manualAuthPassController.text.trim();
                     String nickname =
                         nicknameController.text.trim().isEmpty ? "Cooler $id" : nicknameController.text.trim();
                     Navigator.pop(ctx);
@@ -1652,6 +1667,7 @@ class _ControllerPageState extends State<ControllerPage> {
                       nickname: nickname,
                       mode: "WiFi",
                       lastIp: manualIp.isEmpty ? null : manualIp,
+                      httpAuthPass: manualAuthPass.isEmpty ? null : manualAuthPass,
                     ));
                   },
                   child: Text("Tambah", style: TextStyle(color: accentColor)),
