@@ -477,138 +477,414 @@ static const char SETUP_PAGE_HTML[] PROGMEM = R"rawliteral(
 <html lang="id">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Setup WiFi ESP32 Cooler</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#080b14">
+<title>ESP32 Cooler • WiFi Setup</title>
 <style>
-  :root{--bg:#05050f;--card:#10122a;--accent:#3ee6c4;--accent2:#5b8cff;--text:#eef0ff;--faint:#8b8fb8;--danger:#ff6b6b;}
-  *{box-sizing:border-box;}
-  body{margin:0;background:linear-gradient(160deg,#05050f,#0a0d24 60%,#05050f);color:var(--text);
-       font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;padding:20px;min-height:100vh;}
-  .card{background:var(--card);border:1px solid #23264d;border-radius:16px;padding:20px;margin-bottom:16px;
-        box-shadow:0 8px 24px rgba(0,0,0,.35);}
-  h1{font-size:19px;margin:0 0 4px;background:linear-gradient(90deg,var(--accent),var(--accent2));
-     -webkit-background-clip:text;background-clip:text;color:transparent;}
-  p.sub{color:var(--faint);font-size:12px;margin:0 0 18px;}
-  .row{display:flex;align-items:center;justify-content:space-between;padding:6px 0;font-size:13px;}
-  .row .k{color:var(--faint);}
-  .row .v{font-weight:700;letter-spacing:.5px;}
-  button{width:100%;padding:14px;border-radius:12px;border:none;font-size:14px;font-weight:800;
-         letter-spacing:.5px;cursor:pointer;margin-top:6px;}
-  .btn-primary{background:linear-gradient(90deg,var(--accent),var(--accent2));color:#04101a;}
-  .btn-outline{background:transparent;border:1px solid #33375f;color:var(--text);}
-  input{width:100%;padding:13px;border-radius:12px;border:1px solid #2a2e58;background:#0b0d24;
-        color:var(--text);font-size:14px;margin-top:10px;}
-  input:focus{outline:none;border-color:var(--accent);}
-  #wifiList{margin-top:12px;}
-  .wifi-item{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;
-             background:#0b0d24;border:1px solid #23264d;border-radius:10px;margin-bottom:8px;cursor:pointer;}
-  .wifi-item:active{border-color:var(--accent);}
-  .wifi-item .ssid{font-size:13px;}
-  .wifi-item .rssi{font-size:11px;color:var(--faint);}
-  #status{margin-top:14px;font-size:13px;line-height:1.5;min-height:18px;}
-  .ok{color:var(--accent);}
-  .err{color:var(--danger);}
-  .spin{display:inline-block;width:14px;height:14px;border:2px solid #33375f;border-top-color:var(--accent);
-        border-radius:50%;animation:sp .7s linear infinite;vertical-align:middle;margin-right:6px;}
-  @keyframes sp{to{transform:rotate(360deg);}}
+:root{
+  --bg:#080b14;--panel:#101522;--panel2:#0c111c;--line:#202a3b;
+  --text:#f5f7fb;--muted:#8d98aa;--accent:#42e8c0;--accent2:#6b8cff;
+  --danger:#ff6b78;--warn:#ffc857;--shadow:0 20px 60px rgba(0,0,0,.32);
+}
+*{box-sizing:border-box}
+html{background:var(--bg);scroll-behavior:smooth}
+body{
+  margin:0;min-height:100vh;color:var(--text);
+  font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+  background:
+    radial-gradient(900px 420px at 50% -10%,rgba(67,232,192,.10),transparent 60%),
+    radial-gradient(700px 500px at 100% 35%,rgba(107,140,255,.08),transparent 60%),
+    var(--bg);
+}
+button,input{font:inherit}
+button{border:0}
+.container{width:min(100%,720px);margin:auto;padding:18px 16px 42px}
+.topbar{display:flex;align-items:center;justify-content:space-between;margin:4px 2px 22px}
+.brand{display:flex;align-items:center;gap:11px}
+.brand-mark{
+  width:42px;height:42px;border-radius:13px;display:grid;place-items:center;
+  background:linear-gradient(145deg,#18352f,#14233a);border:1px solid #2b4650;
+  box-shadow:0 8px 24px rgba(66,232,192,.08)
+}
+.brand-mark svg{width:22px;height:22px;stroke:var(--accent)}
+.brand-title{font-size:15px;font-weight:800;letter-spacing:.2px}
+.brand-sub{font-size:11px;color:var(--muted);margin-top:2px}
+.status-pill{
+  display:flex;align-items:center;gap:7px;padding:8px 11px;border-radius:999px;
+  background:#0d1719;border:1px solid #1e4039;color:#9debd9;font-size:11px;font-weight:700
+}
+.status-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px var(--accent)}
+.hero{margin-bottom:16px}
+.eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--accent);font-weight:800;margin-bottom:8px}
+h1{font-size:clamp(25px,7vw,34px);line-height:1.08;margin:0 0 9px;letter-spacing:-.8px}
+.hero p{margin:0;color:var(--muted);font-size:13px;line-height:1.65;max-width:590px}
+.card{
+  background:linear-gradient(180deg,rgba(18,24,37,.98),rgba(13,18,29,.98));
+  border:1px solid var(--line);border-radius:22px;padding:18px;margin-bottom:14px;
+  box-shadow:var(--shadow);overflow:hidden
+}
+.card-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:15px}
+.card-title{font-size:14px;font-weight:800}
+.card-note{font-size:11px;color:var(--muted);margin-top:3px}
+.icon{
+  width:36px;height:36px;border-radius:11px;background:#121d2c;border:1px solid #253247;
+  display:grid;place-items:center;flex:0 0 auto
+}
+.icon svg{width:18px;height:18px;stroke:var(--accent)}
+.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.info{
+  min-width:0;background:var(--panel2);border:1px solid #1b2636;border-radius:15px;padding:13px
+}
+.label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-weight:700}
+.value-row{display:flex;align-items:center;gap:8px;margin-top:7px}
+.value{font-size:14px;font-weight:800;letter-spacing:.4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.copy{
+  margin-left:auto;width:28px;height:28px;border-radius:9px;background:#172132;color:#aeb9ca;
+  border:1px solid #26344a;display:grid;place-items:center;cursor:pointer;flex:0 0 auto
+}
+.copy:active{transform:scale(.96)}
+.copy svg{width:14px;height:14px}
+.network{display:none;margin-top:10px;padding:11px 13px;border-radius:13px;background:#0c1918;border:1px solid #1d4039}
+.network.show{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.network-label{font-size:10px;color:#7fd8c7;text-transform:uppercase;letter-spacing:1px;font-weight:800}
+.network-value{font-size:12px;font-weight:700;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.step{
+  display:flex;gap:12px;align-items:flex-start;padding:12px 0;border-bottom:1px solid #1b2432
+}
+.step:last-child{border-bottom:0;padding-bottom:0}
+.step:first-child{padding-top:0}
+.step-num{
+  width:27px;height:27px;border-radius:9px;background:#172233;border:1px solid #29384d;
+  display:grid;place-items:center;color:#aebbd0;font-size:11px;font-weight:800;flex:0 0 auto
+}
+.step strong{font-size:12px;display:block;margin-bottom:3px}
+.step span{font-size:11px;color:var(--muted);line-height:1.5}
+.scan{
+  width:100%;height:48px;border-radius:14px;background:#151e2d;border:1px solid #29364b;
+  color:var(--text);font-size:13px;font-weight:800;cursor:pointer;display:flex;align-items:center;
+  justify-content:center;gap:9px;transition:.18s
+}
+.scan:hover{border-color:#3d536d;background:#192436}
+.scan:active{transform:translateY(1px)}
+.scan svg{width:17px;height:17px;stroke:var(--accent)}
+.scan.loading svg{animation:spin .8s linear infinite}
+#wifiList{margin-top:11px}
+.wifi-item{
+  display:flex;align-items:center;gap:11px;width:100%;padding:12px;border-radius:14px;
+  background:#0d131e;border:1px solid #1c2737;margin-bottom:7px;cursor:pointer;text-align:left;
+  color:var(--text);transition:.18s
+}
+.wifi-item:hover{border-color:#36516a;background:#101927}
+.wifi-icon{width:34px;height:34px;border-radius:10px;background:#13202b;display:grid;place-items:center;flex:0 0 auto}
+.wifi-icon svg{width:17px;height:17px;stroke:#9aa9bb}
+.wifi-main{min-width:0;flex:1}
+.wifi-name{font-size:12px;font-weight:750;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wifi-meta{font-size:10px;color:var(--muted);margin-top:3px}
+.wifi-arrow{color:#647187;font-size:18px}
+.field{margin-top:13px}
+.field-label{display:block;font-size:11px;font-weight:750;color:#b7c1d0;margin:0 0 7px 2px}
+.input-wrap{position:relative}
+input{
+  width:100%;height:49px;padding:0 44px 0 14px;border-radius:14px;border:1px solid #273448;
+  background:#0a101a;color:var(--text);font-size:13px;outline:none;transition:.18s
+}
+input::placeholder{color:#5e6b7f}
+input:focus{border-color:#3f8f82;box-shadow:0 0 0 3px rgba(66,232,192,.08)}
+.toggle-pass{
+  position:absolute;right:6px;top:6px;width:37px;height:37px;border-radius:10px;
+  background:transparent;color:#748196;cursor:pointer;display:grid;place-items:center
+}
+.toggle-pass svg{width:17px;height:17px}
+.primary{
+  width:100%;height:51px;margin-top:14px;border-radius:15px;cursor:pointer;
+  background:linear-gradient(100deg,#37dcb9,#5f86ff);color:#071019;font-size:13px;font-weight:900;
+  box-shadow:0 12px 28px rgba(76,153,255,.18);transition:.18s
+}
+.primary:hover{filter:brightness(1.06)}
+.primary:active{transform:translateY(1px)}
+.primary:disabled{opacity:.55;cursor:not-allowed}
+#status{min-height:0;margin-top:11px;font-size:11px;line-height:1.55}
+.alert{padding:11px 12px;border-radius:12px}
+.ok{background:#0d1e1b;border:1px solid #214c42;color:#91e8d6}
+.err{background:#241317;border:1px solid #56303a;color:#ff9aa4}
+.muted{color:var(--muted)}
+.empty{padding:14px;text-align:center;color:var(--muted);font-size:11px;border:1px dashed #263246;border-radius:13px}
+.footer{text-align:center;color:#566276;font-size:10px;padding:7px 0 0}
+.hidden{display:none!important}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:520px){
+  .container{padding:15px 12px 32px}
+  .card{padding:15px;border-radius:19px}
+  .info-grid{grid-template-columns:1fr}
+  .status-pill{padding:7px 9px}
+  .brand-mark{width:39px;height:39px}
+}
 </style>
 </head>
 <body>
+<div class="container">
 
-  <div class="card">
-    <h1>⚙️ Setup WiFi ESP32 Cooler</h1>
-    <p class="sub">Dibuka langsung dari browser, tidak perlu aplikasi.</p>
-    <div class="row"><span class="k">Device ID</span><span class="v" id="deviceId">-</span></div>
-    <div class="row"><span class="k">Password Kontrol</span><span class="v" id="authPass">-</span></div>
-    <p class="sub" style="margin:6px 0 0;">⬆️ Catat 2 nilai di atas. Kalau nanti nambah cooler ini lewat menu "Manual (WiFi)" di aplikasi, kamu perlu masukkan keduanya supaya bisa mengontrol (bukan cuma lihat status).</p>
-    <div class="row" id="rowNet" style="display:none;">
-      <span class="k">Status Jaringan</span><span class="v" id="netInfo">-</span>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8">
+          <path d="M12 3v18M7 6.5l10 11M17 6.5l-10 11M4.5 12h15"/>
+          <circle cx="12" cy="12" r="3.2"/>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-title">ESP32 Cooler</div>
+        <div class="brand-sub">Device configuration</div>
+      </div>
     </div>
-  </div>
+    <div class="status-pill"><span class="status-dot"></span>READY</div>
+  </header>
 
-  <div class="card">
-    <button class="btn-outline" onclick="scanWifi()">🔍 Cari WiFi Sekitar</button>
+  <section class="hero">
+    <div class="eyebrow">Network setup</div>
+    <h1>Hubungkan cooler ke WiFi</h1>
+    <p>Pilih jaringan di sekitar, masukkan password, lalu simpan. Setelah tersambung, perangkat siap dikontrol dari jaringan lokal.</p>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div>
+        <div class="card-title">Informasi perangkat</div>
+        <div class="card-note">Gunakan data ini saat menambahkan perangkat di aplikasi.</div>
+      </div>
+      <div class="icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8">
+          <rect x="4" y="3" width="16" height="18" rx="3"/>
+          <path d="M8 7h8M8 11h8M8 15h4"/>
+        </svg>
+      </div>
+    </div>
+
+    <div class="info-grid">
+      <div class="info">
+        <div class="label">Device ID</div>
+        <div class="value-row">
+          <div class="value" id="deviceId">—</div>
+          <button class="copy" onclick="copyValue('deviceId')" aria-label="Salin Device ID">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <rect x="8" y="8" width="11" height="11" rx="2"/>
+              <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="info">
+        <div class="label">Password kontrol</div>
+        <div class="value-row">
+          <div class="value" id="authPass">—</div>
+          <button class="copy" onclick="copyValue('authPass')" aria-label="Salin password kontrol">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <rect x="8" y="8" width="11" height="11" rx="2"/>
+              <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0 2 2v8"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="network" id="rowNet">
+      <div>
+        <div class="network-label">Jaringan aktif</div>
+        <div class="network-value" id="netInfo">—</div>
+      </div>
+      <span style="color:#42e8c0;font-size:16px">●</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div>
+        <div class="card-title">Cara cepat</div>
+        <div class="card-note">Selesaikan tiga langkah berikut.</div>
+      </div>
+      <div class="icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8">
+          <path d="M12 3l2.3 5.1L20 10.3l-5.7 2.2L12 18l-2.3-5.5L4 10.3l5.7-2.2L12 3z"/>
+          <path d="M19 17v4M17 19h4"/>
+        </svg>
+      </div>
+    </div>
+    <div class="step">
+      <div class="step-num">01</div>
+      <div><strong>Pilih jaringan</strong><span>Tekan tombol scan untuk melihat WiFi yang tersedia di sekitar.</span></div>
+    </div>
+    <div class="step">
+      <div class="step-num">02</div>
+      <div><strong>Masukkan password</strong><span>Tap nama WiFi, lalu isi password jaringan tersebut.</span></div>
+    </div>
+    <div class="step">
+      <div class="step-num">03</div>
+      <div><strong>Hubungkan</strong><span>ESP32 akan menyimpan konfigurasi dan melakukan restart otomatis.</span></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div>
+        <div class="card-title">Pilih jaringan WiFi</div>
+        <div class="card-note">Jaringan terkuat akan ditampilkan lebih dahulu.</div>
+      </div>
+      <div class="icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8">
+          <path d="M3 9.5a14 14 0 0 1 18 0M6.5 13a8.7 8.7 0 0 1 11 0M10 16.5a3.7 3.7 0 0 1 4 0"/>
+          <circle cx="12" cy="20" r="1"/>
+        </svg>
+      </div>
+    </div>
+
+    <button class="scan" id="scanBtn" onclick="scanWifi()">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="2">
+        <circle cx="11" cy="11" r="6.5"/><path d="M16 16l5 5"/>
+      </svg>
+      <span id="scanText">Cari WiFi sekitar</span>
+    </button>
+
     <div id="wifiList"></div>
 
-    <input type="text" id="ssid" placeholder="Nama WiFi (SSID)">
-    <input type="password" id="password" placeholder="Password WiFi">
-    <button class="btn-primary" onclick="connectWifi()">🔗 Hubungkan</button>
+    <div class="field">
+      <label class="field-label" for="ssid">Nama WiFi</label>
+      <input type="text" id="ssid" autocomplete="off" autocapitalize="none" placeholder="Pilih jaringan atau ketik SSID">
+    </div>
+
+    <div class="field">
+      <label class="field-label" for="password">Password WiFi</label>
+      <div class="input-wrap">
+        <input type="password" id="password" autocomplete="off" placeholder="Masukkan password WiFi">
+        <button class="toggle-pass" type="button" onclick="togglePassword()" aria-label="Tampilkan password">
+          <svg id="eyeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z"/>
+            <circle cx="12" cy="12" r="2.5"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <button class="primary" id="connectBtn" onclick="connectWifi()">Hubungkan ke WiFi</button>
     <div id="status"></div>
-  </div>
+  </section>
+
+  <div class="footer">ESP32 Cooler • Local configuration</div>
+</div>
 
 <script>
-function setStatus(html, cls){
-  const el = document.getElementById('status');
-  el.innerHTML = html;
-  el.className = cls || '';
+const $ = id => document.getElementById(id);
+
+function setStatus(message, type){
+  const el = $('status');
+  if(!message){el.innerHTML='';el.className='';return;}
+  el.innerHTML = '<div class="alert '+(type==='ok'?'ok':'err')+'">'+message+'</div>';
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
 }
 
 async function loadDeviceInfo(){
   try{
-    const r = await fetch('/status');
+    const r = await fetch('/status',{cache:'no-store'});
     const j = await r.json();
-    document.getElementById('deviceId').textContent = j.deviceId || '-';
-    document.getElementById('authPass').textContent = j.httpAuthPass || '-';
-    if (j.wifiConnected){
-      document.getElementById('rowNet').style.display = 'flex';
-      document.getElementById('netInfo').textContent = (j.ssid || '-') + ' - ' + (j.ip || '-');
+    $('deviceId').textContent = j.deviceId || '—';
+    $('authPass').textContent = j.httpAuthPass || '—';
+    if(j.wifiConnected){
+      $('rowNet').classList.add('show');
+      $('netInfo').textContent = (j.ssid || 'WiFi')+' • '+(j.ip || '—');
     }
+  }catch(e){
+    $('deviceId').textContent='—';
+    $('authPass').textContent='—';
+  }
+}
+
+async function copyValue(id){
+  const text=$(id).textContent.trim();
+  if(!text || text==='—') return;
+  try{
+    await navigator.clipboard.writeText(text);
+    const old=$('#'+id).parentElement.querySelector('.copy');
+    old.style.borderColor='#42e8c0';
+    setTimeout(()=>old.style.borderColor='',900);
   }catch(e){}
 }
 
+function togglePassword(){
+  const input=$('password');
+  input.type=input.type==='password'?'text':'password';
+}
+
+function signalLabel(rssi){
+  if(rssi >= -55) return 'Sinyal sangat kuat';
+  if(rssi >= -67) return 'Sinyal kuat';
+  if(rssi >= -75) return 'Sinyal cukup';
+  return 'Sinyal lemah';
+}
+
 async function scanWifi(){
-  const list = document.getElementById('wifiList');
-  list.innerHTML = '<p style="color:#8b8fb8;font-size:12px;"><span class="spin"></span>Memindai jaringan...</p>';
+  const list=$('wifiList'),btn=$('scanBtn'),text=$('scanText');
+  btn.classList.add('loading');btn.disabled=true;text.textContent='Memindai jaringan…';
+  list.innerHTML='<div class="empty">Mencari jaringan WiFi di sekitar…</div>';
   try{
-    let networks = null;
-    for (let i = 0; i < 12; i++){
-      const r = await fetch('/scanwifi');
-      const ct = r.headers.get('content-type') || '';
-      if (ct.indexOf('application/json') !== -1){
-        networks = await r.json();
-        break;
-      }
-      await new Promise(res => setTimeout(res, 900));
+    let networks=null;
+    for(let i=0;i<14;i++){
+      const r=await fetch('/scanwifi',{cache:'no-store'});
+      const ct=r.headers.get('content-type')||'';
+      if(ct.includes('application/json')){networks=await r.json();break;}
+      await new Promise(res=>setTimeout(res,800));
     }
-    if (!networks){
-      list.innerHTML = '<p style="color:#ff6b6b;font-size:12px;">Gagal memindai, coba lagi.</p>';
-      return;
-    }
-    if (networks.length === 0){
-      list.innerHTML = '<p style="color:#8b8fb8;font-size:12px;">Tidak ada WiFi ditemukan.</p>';
-      return;
-    }
-    networks.sort((a,b) => b.rssi - a.rssi);
-    list.innerHTML = '';
-    networks.forEach(n => {
-      const div = document.createElement('div');
-      div.className = 'wifi-item';
-      div.innerHTML = '<span class="ssid">📶 ' + n.ssid + '</span><span class="rssi">' + n.rssi + ' dBm</span>';
-      div.onclick = () => { document.getElementById('ssid').value = n.ssid; document.getElementById('password').focus(); };
+    if(!networks){list.innerHTML='<div class="empty">Pemindaian gagal. Coba lagi.</div>';return;}
+    networks.sort((a,b)=>(b.rssi||-100)-(a.rssi||-100));
+    if(!networks.length){list.innerHTML='<div class="empty">Tidak ada jaringan WiFi yang ditemukan.</div>';return;}
+    list.innerHTML='';
+    const seen=new Set();
+    networks.forEach(n=>{
+      if(!n.ssid || seen.has(n.ssid)) return;
+      seen.add(n.ssid);
+      const div=document.createElement('button');
+      div.className='wifi-item';
+      div.type='button';
+      div.innerHTML=
+        '<div class="wifi-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">'+
+        '<path d="M3 9.5a14 14 0 0 1 18 0M6.5 13a8.7 8.7 0 0 1 11 0M10 16.5a3.7 3.7 0 0 1 4 0"/><circle cx="12" cy="20" r="1"/></svg></div>'+
+        '<div class="wifi-main"><div class="wifi-name">'+escapeHtml(n.ssid)+'</div>'+
+        '<div class="wifi-meta">'+(n.rssi??'—')+' dBm • '+signalLabel(n.rssi||-100)+'</div></div>'+
+        '<div class="wifi-arrow">›</div>';
+      div.onclick=()=>{
+        $('ssid').value=n.ssid;
+        $('password').focus();
+        setStatus('', '');
+      };
       list.appendChild(div);
     });
   }catch(e){
-    list.innerHTML = '<p style="color:#ff6b6b;font-size:12px;">Gagal memindai, coba lagi.</p>';
+    list.innerHTML='<div class="empty">Tidak dapat memindai jaringan. Pastikan HP masih terhubung ke ESP32.</div>';
+  }finally{
+    btn.classList.remove('loading');btn.disabled=false;text.textContent='Cari WiFi sekitar';
   }
 }
 
 async function connectWifi(){
-  const ssid = document.getElementById('ssid').value.trim();
-  const password = document.getElementById('password').value;
-  if (!ssid){ setStatus('Isi nama WiFi dulu.', 'err'); return; }
-  setStatus('<span class="spin"></span>Menyimpan & menghubungkan...', '');
+  const ssid=$('ssid').value.trim(),password=$('password').value;
+  if(!ssid){setStatus('Pilih atau masukkan nama WiFi terlebih dahulu.','err');$('ssid').focus();return;}
+  const btn=$('connectBtn');
+  btn.disabled=true;btn.textContent='Menyimpan konfigurasi…';setStatus('', '');
   try{
-    const body = 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(password);
-    await fetch('/setwifi', {
-      method: 'POST',
-      headers: {'Content-Type':'application/x-www-form-urlencoded'},
-      body: body
+    const body='ssid='+encodeURIComponent(ssid)+'&password='+encodeURIComponent(password);
+    const r=await fetch('/setwifi',{
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded'},
+      body
     });
-    setStatus('✅ Tersimpan! ESP32 sedang restart & mencoba konek ke WiFi rumah (kurang lebih 15 detik).<br>' +
-               'Sambungkan HP kembali ke WiFi rumah, lalu buka aplikasi, Tambah Cooler, tab Manual (WiFi), masukkan Device ID di atas.', 'ok');
+    if(!r.ok) throw new Error('request failed');
+    setStatus('<strong>Konfigurasi tersimpan.</strong><br>ESP32 sedang restart dan mencoba terhubung ke WiFi. Setelah itu, sambungkan HP ke WiFi yang sama untuk melanjutkan dari aplikasi.','ok');
   }catch(e){
-    setStatus('✅ Perintah terkirim. ESP32 kemungkinan sudah restart untuk konek WiFi (koneksi ke halaman ini terputus, itu normal).<br>' +
-               'Sambungkan HP kembali ke WiFi rumah lalu buka aplikasi.', 'ok');
+    setStatus('<strong>Perintah sudah dikirim.</strong><br>Koneksi ke halaman akan terputus saat ESP32 restart. Ini normal. Sambungkan HP kembali ke WiFi rumah setelah beberapa saat.','ok');
+  }finally{
+    setTimeout(()=>{btn.disabled=false;btn.textContent='Hubungkan ke WiFi';},2500);
   }
 }
 
@@ -635,15 +911,23 @@ void handleStatusHttp() {
 void handleSetCmd() {
   if (!checkHttpAuth()) return;
   lastAppContact = millis();
+
   JsonDocument doc;
   if (server.hasArg("voltage")) doc["voltage"] = server.arg("voltage").toFloat();
   if (server.hasArg("ledMode")) doc["ledMode"] = server.arg("ledMode");
   if (server.hasArg("fanSpeed")) doc["fanSpeed"] = server.arg("fanSpeed").toInt();
   if (server.hasArg("action")) doc["action"] = server.arg("action");
+
   String cmd;
   serializeJson(doc, cmd);
+
+  // Jalankan perintah TERLEBIH DAHULU, lalu kirim snapshot status aktual.
+  // Dengan cara ini aplikasi WiFi tidak perlu menunggu polling /status
+  // untuk mengetahui bahwa voltage sudah berubah.
   processCommandJson(cmd);
-  server.send(200, "text/plain", "OK");
+
+  String statusJson = buildStatusJson(false);
+  server.send(200, "application/json", statusJson);
 }
 
 void handleSwitchBle() {
