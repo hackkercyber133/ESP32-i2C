@@ -733,7 +733,10 @@ class _ControllerPageState extends State<ControllerPage> {
     _consecutiveWifiPollFailures = 0;
     await _startUdpDiscovery();
     _wifiPollTimer?.cancel();
-    _wifiPollTimer = Timer.periodic(Duration(seconds: 3), (_) => _pollWifiStatus());
+    // Poll hanya sebagai safety-sync. Perintah voltage sekarang mendapat
+    // snapshot status langsung dari response /set, jadi UI tidak bergantung
+    // pada polling untuk berubah.
+    _wifiPollTimer = Timer.periodic(const Duration(seconds: 1), (_) => _pollWifiStatus());
     _pollWifiStatus(); // langsung coba sekali, jangan tunggu 3 detik pertama
   }
 
@@ -888,28 +891,58 @@ class _ControllerPageState extends State<ControllerPage> {
 
   bool get _wifiLocalConnected => activeCooler?.mode == "WiFi" && status == "🟢 Online";
 
-  void sendCommandLocalWifi(double volt) async {
+  Future<void> sendCommandLocalWifi(double volt) async {
     if (_wifiIp == null) {
       _showSnack("⚠️ Belum menemukan ESP32 di jaringan, tunggu sebentar / cek WiFi HP");
       return;
     }
+
     try {
+      // Firmware sekarang mengembalikan snapshot status ESP32 langsung setelah
+      // applyVoltage(), jadi UI tidak perlu menunggu timer polling.
       final response = await http
-          .post(Uri.http(_wifiIp!, "/set", {"voltage": volt.toString()}), headers: esp32AuthHeaders(activeCooler))
-          .timeout(Duration(seconds: 3));
+          .post(
+            Uri.http(_wifiIp!, "/set", {"voltage": volt.toString()}),
+            headers: esp32AuthHeaders(activeCooler),
+          )
+          .timeout(const Duration(seconds: 2));
+
       if (response.statusCode == 200) {
         try {
-          final data = jsonDecode(response.body);
-          if (data is Map<String, dynamic>) {
-            setState(() => _applyDeviceStatus(data));
+          final decoded = jsonDecode(response.body);
+          if (decoded is Map) {
+            final data = Map<String, dynamic>.from(decoded);
+            if (data['deviceId'] == null || data['deviceId'] == activeCooler?.id) {
+              if (mounted) {
+                setState(() => _applyDeviceStatus(data));
+              }
+            }
           }
-        } catch (_) {}
-        _showSnack(powerGood ? "✅ ${volt.toStringAsFixed(0)}V: $_pdStatusLabel" : "⏳ Request ${volt.toStringAsFixed(0)}V terkirim, menunggu negosiasi PD...");
+        } catch (_) {
+          // Kompatibel dengan firmware lama yang masih mengembalikan "OK".
+          // Optimistic UI di atas tetap membuat pilihan voltage langsung berubah.
+        }
+
+        if (mounted) {
+          final actual = setVolt.toStringAsFixed(0);
+          _showSnack(
+            powerGood
+                ? "✅ ${actual}V aktif"
+                : "⏳ ${actual}V dipilih, menunggu Power Good...",
+          );
+        }
       } else {
+        // Request ditolak: sinkronkan ulang dengan status ESP32.
         _showSnack("❌ ESP32 menolak perintah voltage");
+        _pollWifiStatus();
       }
+    } on TimeoutException {
+      // Jangan membuat UI terasa macet. Status akan disinkronkan oleh polling.
+      _showSnack("⚠️ Respons WiFi terlambat, menyinkronkan status…");
+      _pollWifiStatus();
     } catch (e) {
       _showSnack("⚠️ Gagal kirim perintah, cek koneksi WiFi");
+      _pollWifiStatus();
     }
   }
 
@@ -1117,8 +1150,19 @@ class _ControllerPageState extends State<ControllerPage> {
       _showSnack("⚠️ Pilih atau tambah cooler dulu");
       return;
     }
+
     volt = double.parse(volt.toStringAsFixed(1));
+
+    // UI OPTIMISTIC UPDATE:
+    // Saat user memilih 9V/12V/15V, indikator aplikasi langsung pindah.
+    // Sebelumnya mode WiFi menunggu polling /status (interval beberapa detik),
+    // sehingga ESP32 sudah berubah tetapi kartu voltage masih menampilkan nilai lama.
     if (connectionMode == "WiFi") {
+      setState(() {
+        setVolt = volt;
+        pdStatus = "PD_WAITING";
+        powerGood = false;
+      });
       sendCommandLocalWifi(volt);
     } else {
       sendCommandBLE(volt);
