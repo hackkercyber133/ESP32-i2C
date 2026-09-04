@@ -2155,6 +2155,7 @@ class _ControllerPageState extends State<ControllerPage> {
       _tickerName('VLADIMIR PUTIN'),
       _tickerName('FERN'),
       _tickerName('CHODOX'),
+      _tickerName('🅵🆈🆉 "フランキー"'),
     ];
     return Row(mainAxisSize: MainAxisSize.min, children: [
       for (int i = 0; i < items.length; i++) ...[
@@ -2686,22 +2687,31 @@ class _RunningMarqueeState extends State<_RunningMarquee> with SingleTickerProvi
   @override
   Widget build(BuildContext context) {
     if (!_measured) {
-      // Lewat sekali secara transparan cuma untuk mengukur lebar konten
-      // sebelum animasi berjalan sungguhan.
+      // Bug lama: Container ini kena tight-constraint selebar bar ticker
+      // (bukan selebar asli kontennya), jadi _contentWidth yang terukur
+      // salah -> titik "nyambung ulang" meleset -> keliatan loncat tiap
+      // 1 putaran. IntrinsicWidth memaksa pengukuran pakai lebar ASLI
+      // konten, lepas dari constraint parent.
       return Opacity(
         opacity: 0,
-        child: Container(key: _measureKey, child: widget.child),
+        child: IntrinsicWidth(
+          child: Container(key: _measureKey, child: widget.child),
+        ),
       );
     }
     return ClipRect(
-      child: Transform.translate(
-        offset: Offset(_offset, 0),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          widget.child,
-          SizedBox(width: widget.gap),
-          widget.child, // salinan kedua -> transisi loop terlihat nyambung/mulus
-          SizedBox(width: widget.gap),
-        ]),
+      child: UnconstrainedBox(
+        alignment: Alignment.centerLeft,
+        clipBehavior: Clip.none,
+        child: Transform.translate(
+          offset: Offset(_offset, 0),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            widget.child,
+            SizedBox(width: widget.gap),
+            widget.child, // salinan kedua -> transisi loop terlihat nyambung/mulus
+            SizedBox(width: widget.gap),
+          ]),
+        ),
       ),
     );
   }
