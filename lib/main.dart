@@ -2470,7 +2470,7 @@ class _ControllerPageState extends State<ControllerPage> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: AppColors.card(isDark),
+      backgroundColor: AppColors.surface(isDark),
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (ctx) {
         return StatefulBuilder(builder: (ctx, setSheetState) {
