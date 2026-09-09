@@ -502,6 +502,14 @@ class _ControllerPageState extends State<ControllerPage> {
   // ===== BLUETOOTH =====
   BluetoothDevice? bleDevice;
   BluetoothCharacteristic? _controlChar; // cache karakteristik supaya tidak discoverServices() tiap kirim perintah
+
+  // Buffer buat nyambung ulang JSON status yang dikirim firmware dalam
+  // beberapa potongan notify BLE (lihat komentar publishStatusBLE() di
+  // firmware) - notify GATT gak auto-reassembly kalau lebih panjang dari
+  // MTU, jadi kita yang nyambung manual pakai header 2 byte per paket.
+  List<int> _bleChunkBuffer = [];
+  int _bleChunkExpectedTotal = 0;
+  int _bleChunkReceivedCount = 0;
   bool isScanning = false;
   List<ScanResult> scanResults = [];
   bool bleConnected = false;
@@ -785,6 +793,57 @@ class _ControllerPageState extends State<ControllerPage> {
     }
   }
 
+  // Tiap paket notify BLE diawali 2 byte header: [chunkIndex, totalChunks],
+  // sisanya potongan JSON mentah. Nyambung semua potongan sampai lengkap,
+  // baru di-parse sekali. Kalau ada potongan yang keselip/hilang di tengah
+  // jalan (paket berikutnya chunkIndex-nya gak nyambung urutan), buang
+  // buffer yang lagi dikumpulin daripada nekat parse JSON yang udah pasti
+  // rusak - nunggu siklus publish berikutnya (chunkIndex 0 lagi) buat mulai
+  // dari awal.
+  void _handleBleStatusChunk(List<int> value) {
+    if (value.length < 2) return;
+    final chunkIndex = value[0];
+    final totalChunks = value[1];
+    final payload = value.sublist(2);
+
+    if (chunkIndex == 0) {
+      _bleChunkBuffer = <int>[];
+      _bleChunkExpectedTotal = totalChunks;
+      _bleChunkReceivedCount = 0;
+    } else if (chunkIndex != _bleChunkReceivedCount || totalChunks != _bleChunkExpectedTotal) {
+      // Potongan gak nyambung urutan (ke-skip/kedatengan campur sama sesi
+      // publish lain) - buang, tunggu chunk 0 berikutnya.
+      _bleChunkBuffer = [];
+      _bleChunkExpectedTotal = 0;
+      _bleChunkReceivedCount = 0;
+      return;
+    }
+
+    _bleChunkBuffer.addAll(payload);
+    _bleChunkReceivedCount++;
+
+    if (_bleChunkReceivedCount < _bleChunkExpectedTotal) return; // masih nunggu potongan lain
+
+    String jsonPayload = "";
+    try {
+      jsonPayload = utf8.decode(_bleChunkBuffer);
+      var data = jsonDecode(jsonPayload);
+      if (data['deviceId'] != null && data['deviceId'] != activeCooler?.id) return;
+      setState(() {
+        _applyDeviceStatus(Map<String, dynamic>.from(data));
+      });
+      if (activeCooler != null) {
+        HistoryService.recordStatus(coolerId: activeCooler!.id, online: true, voltage: setVolt);
+      }
+    } catch (e) {
+      debugPrint("BLE status parse gagal: $e | payload: $jsonPayload");
+    } finally {
+      _bleChunkBuffer = [];
+      _bleChunkExpectedTotal = 0;
+      _bleChunkReceivedCount = 0;
+    }
+  }
+
   void _applyDeviceStatus(Map<String, dynamic> data) {
     final rawVoltage = data['setVoltage'] ?? data['requestedVoltage'];
     final rawPowerGood = data['powerGood'];
@@ -846,17 +905,7 @@ class _ControllerPageState extends State<ControllerPage> {
           await http.get(Uri.http(_wifiIp!, "/status")).timeout(Duration(seconds: 3));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        // Request ini point-to-point ke _wifiIp milik cooler ini (bukan broadcast),
-        // jadi tidak perlu filter deviceId di sini - filter itu dulu jadi penyebab
-        // status (voltase/PD) macet di nilai lama kalau deviceId sempat berubah
-        // (mis. setelah reflash firmware) walau device yang di-poll sudah benar.
-        // Kalau ID-nya memang berubah, sinkronkan supaya UDP discovery & history
-        // tetap konsisten ke depannya.
-        final reportedId = data['deviceId'];
-        if (reportedId is String && reportedId.isNotEmpty && activeCooler != null && activeCooler!.id != reportedId) {
-          activeCooler!.id = reportedId;
-          _savePairedCoolers();
-        }
+        if (data['deviceId'] != null && data['deviceId'] != activeCooler?.id) return;
         _consecutiveWifiPollFailures = 0;
         setState(() {
           status = "🟢 Online";
@@ -1026,17 +1075,11 @@ class _ControllerPageState extends State<ControllerPage> {
           connectionPriorityRequest: ConnectionPriority.high,
         );
       } catch (_) {}
-      // MTU lebih besar = notify status JSON muat sekali kirim, tanpa terpotong.
-      // CATATAN KOREKSI: 247 SEBELUMNYA DIKIRA batas maksimum NimBLE - itu
-      // keliru. Batas default NimBLE-Arduino sebenarnya 517 byte (batas spek
-      // BLE ATT_MTU). JSON status sekarang bisa tembus ~290+ byte (field
-      // pdStatus, fanSpeed, fanRpm, httpAuthPass, dst), padahal usable payload
-      // di MTU 247 cuma 244 byte (MTU - 3 byte header ATT) - jadi notify BLE
-      // (beda dari HTTP, tidak ada reassembly) kepotong di tengah, gagal
-      // di-decode app, dan app nyangkut di data lama selamanya. Naikkan ke
-      // 512 (margin aman di bawah batas 517) supaya selalu muat.
+      // MTU lebih besar = command JSON muat sekali kirim, tanpa fragmentasi.
+      // Dinaikkan dari 185 ke 247 (maksimum yang didukung NimBLE default) —
+      // JSON status sekarang lebih panjang sejak ada field httpAuthPass.
       try {
-        await device.requestMtu(512);
+        await device.requestMtu(247);
       } catch (_) {}
 
       setState(() {
@@ -1051,28 +1094,7 @@ class _ControllerPageState extends State<ControllerPage> {
             _controlChar = characteristic; // cache sekali di sini, dipakai ulang untuk semua write
             await characteristic.setNotifyValue(true);
             characteristic.onValueReceived.listen((value) {
-              String payload = utf8.decode(value);
-              try {
-                var data = jsonDecode(payload);
-                // Notify BLE ini datang dari koneksi GATT point-to-point ke device
-                // yang sedang connect - tidak perlu filter deviceId (dulu bikin
-                // status voltase/PD macet diam-diam kalau ID sempat tidak cocok).
-                // Sinkronkan activeCooler.id kalau ternyata beda, supaya UDP
-                // discovery WiFi tetap jalan benar setelah ini.
-                final reportedId = data['deviceId'];
-                if (reportedId is String && reportedId.isNotEmpty && activeCooler != null && activeCooler!.id != reportedId) {
-                  activeCooler!.id = reportedId;
-                  _savePairedCoolers();
-                }
-                setState(() {
-                  _applyDeviceStatus(Map<String, dynamic>.from(data));
-                });
-                if (activeCooler != null) {
-                  HistoryService.recordStatus(coolerId: activeCooler!.id, online: true, voltage: setVolt);
-                }
-              } catch (e) {
-                debugPrint("BLE status parse gagal: $e | payload: $payload");
-              }
+              _handleBleStatusChunk(value);
             });
           }
         }
