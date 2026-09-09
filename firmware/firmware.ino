@@ -78,12 +78,220 @@ void scanI2CBus() {
 #define PIN_LED_DATA 4
 #define NUM_LEDS 30
 Adafruit_NeoPixel strip(NUM_LEDS, PIN_LED_DATA, NEO_GRB + NEO_KHZ800);
+
+uint32_t wheelColor(byte pos); // forward declare, dipakai paletteColor() di bawah
+
+// Setiap palet = daftar warna (hex 0xRRGGBB). paletteColor() interpolasi
+// mulus di antara warna² ini, siklus balik ke awal (dipakai animasi jalan).
+// Palet index 0 (rainbow) dikecualikan - pakai wheelColor() (spektrum penuh).
+const uint32_t PALETTE_FIRE[]      = {0xFF0000, 0xFF4500, 0xFFA500, 0xFFFF00};
+const uint32_t PALETTE_ICE[]       = {0x001133, 0x0066CC, 0x66CCFF, 0xFFFFFF};
+const uint32_t PALETTE_OCEAN[]     = {0x001F3F, 0x0074D9, 0x39CCCC, 0x7FDBFF};
+const uint32_t PALETTE_FOREST[]    = {0x013220, 0x228B22, 0x6B8E23, 0x9ACD32};
+const uint32_t PALETTE_SUNSET[]    = {0xFF4500, 0xFF6347, 0xFFD700, 0xFF1493};
+const uint32_t PALETTE_PARTY[]     = {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFF00, 0xFF00FF, 0x00FFFF};
+const uint32_t PALETTE_RED[]       = {0xFF0000, 0x800000};
+const uint32_t PALETTE_GREEN[]     = {0x00FF00, 0x006400};
+const uint32_t PALETTE_BLUE[]      = {0x0000FF, 0x000080};
+const uint32_t PALETTE_PURPLE[]    = {0x800080, 0x4B0082, 0xEE82EE};
+const uint32_t PALETTE_WARMWHITE[] = {0xFFE4B5, 0xFFDAB9, 0xFFFFFF};
+const uint32_t PALETTE_COOLWHITE[] = {0xE0FFFF, 0xFFFFFF, 0xADD8E6};
+const uint32_t PALETTE_PASTEL[]    = {0xFFD1DC, 0xE6E6FA, 0xC1FFC1, 0xB0E0E6};
+const uint32_t PALETTE_REDBLUE[]   = {0xFF0000, 0x0000FF};
+const uint32_t PALETTE_PINKCYAN[]  = {0xFF1493, 0x00FFFF};
+const uint32_t PALETTE_GOLD[]      = {0xFFD700, 0xB8860B};
+const uint32_t PALETTE_NEON[]      = {0x39FF14, 0xFF073A, 0x04D9FF, 0xFE01B1};
+const uint32_t PALETTE_CANDY[]     = {0xFF69B4, 0xFFB6C1, 0xFFFFFF};
+const uint32_t PALETTE_MONO[]      = {0xFFFFFF};
+
+struct PaletteInfo { const uint32_t* colors; uint8_t count; };
+// Urutan HARUS sama persis dengan urutan palet di generator mode (lihat
+// gen_modes.py) — index 0 = rainbow (ditangani khusus lewat wheelColor()).
+const PaletteInfo PALETTES[] = {
+  { nullptr,             0 }, // 0 rainbow (khusus, pakai wheelColor)
+  { PALETTE_FIRE,        4 }, // 1
+  { PALETTE_ICE,         4 }, // 2
+  { PALETTE_OCEAN,       4 }, // 3
+  { PALETTE_FOREST,      4 }, // 4
+  { PALETTE_SUNSET,      4 }, // 5
+  { PALETTE_PARTY,       6 }, // 6
+  { PALETTE_RED,         2 }, // 7
+  { PALETTE_GREEN,       2 }, // 8
+  { PALETTE_BLUE,        2 }, // 9
+  { PALETTE_PURPLE,      3 }, // 10
+  { PALETTE_WARMWHITE,   3 }, // 11
+  { PALETTE_COOLWHITE,   3 }, // 12
+  { PALETTE_PASTEL,      4 }, // 13
+  { PALETTE_REDBLUE,     2 }, // 14
+  { PALETTE_PINKCYAN,    2 }, // 15
+  { PALETTE_GOLD,        2 }, // 16
+  { PALETTE_NEON,        4 }, // 17
+  { PALETTE_CANDY,       3 }, // 18
+  { PALETTE_MONO,        1 }, // 19
+};
+
+// Ambil warna di posisi 0-255 dalam sebuah palet, blend mulus antar stop
+// warna dan siklus balik ke stop pertama di ujungnya (cocok buat animasi
+// berjalan/rotasi). paletteIdx 0 = rainbow penuh (delegasi ke wheelColor).
+uint32_t paletteColor(int paletteIdx, uint8_t pos) {
+  if (paletteIdx <= 0 || paletteIdx >= (int)(sizeof(PALETTES) / sizeof(PALETTES[0]))) {
+    return wheelColor(pos);
+  }
+  const PaletteInfo& pal = PALETTES[paletteIdx];
+  if (pal.count == 0) return wheelColor(pos);
+  if (pal.count == 1) return pal.colors[0];
+
+  float scaled = (pos / 256.0f) * pal.count;
+  int idxA = ((int)scaled) % pal.count;
+  int idxB = (idxA + 1) % pal.count;
+  float frac = scaled - (int)scaled;
+
+  uint32_t ca = pal.colors[idxA];
+  uint32_t cb = pal.colors[idxB];
+  uint8_t ra = (ca >> 16) & 0xFF, ga = (ca >> 8) & 0xFF, ba = ca & 0xFF;
+  uint8_t rb = (cb >> 16) & 0xFF, gb = (cb >> 8) & 0xFF, bb = cb & 0xFF;
+  uint8_t r = ra + (rb - ra) * frac;
+  uint8_t g = ga + (gb - ga) * frac;
+  uint8_t b = ba + (bb - ba) * frac;
+  return strip.Color(r, g, b);
+}
+
+struct LedModeInfo { const char* id; const char* label; int8_t engine; int8_t palette; uint16_t speedMs; };
+const LedModeInfo LED_MODES[] = {
+  {"off", "Off", -1, 0, 0},
+  {"static_rainbow", "Static - Rainbow", 0, 0, 60},
+  {"static_fire", "Static - Fire", 0, 1, 60},
+  {"static_ice", "Static - Ice", 0, 2, 60},
+  {"static_ocean", "Static - Ocean", 0, 3, 60},
+  {"static_forest", "Static - Forest", 0, 4, 60},
+  {"static_sunset", "Static - Sunset", 0, 5, 60},
+  {"static_party", "Static - Party", 0, 6, 60},
+  {"static_red", "Static - Red", 0, 7, 60},
+  {"static_green", "Static - Green", 0, 8, 60},
+  {"static_blue", "Static - Blue", 0, 9, 60},
+  {"static_purple", "Static - Purple", 0, 10, 60},
+  {"static_warmwhite", "Static - Warm White", 0, 11, 60},
+  {"static_coolwhite", "Static - Cool White", 0, 12, 60},
+  {"static_pastel", "Static - Pastel", 0, 13, 60},
+  {"static_redblue", "Static - Red-Blue", 0, 14, 60},
+  {"static_pinkcyan", "Static - Pink-Cyan", 0, 15, 60},
+  {"static_gold", "Static - Gold", 0, 16, 60},
+  {"static_neon", "Static - Neon", 0, 17, 60},
+  {"static_candy", "Static - Candy", 0, 18, 60},
+  {"static_mono", "Static - Mono White", 0, 19, 60},
+  {"rainbowrun_rainbow", "Rainbow Run - Rainbow", 1, 0, 25},
+  {"rainbowrun_fire", "Rainbow Run - Fire", 1, 1, 25},
+  {"rainbowrun_ice", "Rainbow Run - Ice", 1, 2, 25},
+  {"rainbowrun_ocean", "Rainbow Run - Ocean", 1, 3, 25},
+  {"rainbowrun_forest", "Rainbow Run - Forest", 1, 4, 25},
+  {"rainbowrun_sunset", "Rainbow Run - Sunset", 1, 5, 25},
+  {"rainbowrun_party", "Rainbow Run - Party", 1, 6, 25},
+  {"rainbowrun_red", "Rainbow Run - Red", 1, 7, 25},
+  {"rainbowrun_green", "Rainbow Run - Green", 1, 8, 25},
+  {"rainbowrun_blue", "Rainbow Run - Blue", 1, 9, 25},
+  {"rainbowrun_purple", "Rainbow Run - Purple", 1, 10, 25},
+  {"rainbowrun_warmwhite", "Rainbow Run - Warm White", 1, 11, 25},
+  {"rainbowrun_coolwhite", "Rainbow Run - Cool White", 1, 12, 25},
+  {"rainbowrun_pastel", "Rainbow Run - Pastel", 1, 13, 25},
+  {"rainbowrun_redblue", "Rainbow Run - Red-Blue", 1, 14, 25},
+  {"rainbowrun_pinkcyan", "Rainbow Run - Pink-Cyan", 1, 15, 25},
+  {"rainbowrun_gold", "Rainbow Run - Gold", 1, 16, 25},
+  {"rainbowrun_neon", "Rainbow Run - Neon", 1, 17, 25},
+  {"rainbowrun_candy", "Rainbow Run - Candy", 1, 18, 25},
+  {"rainbowrun_mono", "Rainbow Run - Mono White", 1, 19, 25},
+  {"rainbowcycle_rainbow", "Rainbow Cycle - Rainbow", 2, 0, 20},
+  {"rainbowcycle_fire", "Rainbow Cycle - Fire", 2, 1, 20},
+  {"rainbowcycle_ice", "Rainbow Cycle - Ice", 2, 2, 20},
+  {"rainbowcycle_ocean", "Rainbow Cycle - Ocean", 2, 3, 20},
+  {"rainbowcycle_forest", "Rainbow Cycle - Forest", 2, 4, 20},
+  {"rainbowcycle_sunset", "Rainbow Cycle - Sunset", 2, 5, 20},
+  {"rainbowcycle_party", "Rainbow Cycle - Party", 2, 6, 20},
+  {"rainbowcycle_red", "Rainbow Cycle - Red", 2, 7, 20},
+  {"rainbowcycle_green", "Rainbow Cycle - Green", 2, 8, 20},
+  {"rainbowcycle_blue", "Rainbow Cycle - Blue", 2, 9, 20},
+  {"rainbowcycle_purple", "Rainbow Cycle - Purple", 2, 10, 20},
+  {"rainbowcycle_warmwhite", "Rainbow Cycle - Warm White", 2, 11, 20},
+  {"rainbowcycle_coolwhite", "Rainbow Cycle - Cool White", 2, 12, 20},
+  {"rainbowcycle_pastel", "Rainbow Cycle - Pastel", 2, 13, 20},
+  {"rainbowcycle_redblue", "Rainbow Cycle - Red-Blue", 2, 14, 20},
+  {"rainbowcycle_pinkcyan", "Rainbow Cycle - Pink-Cyan", 2, 15, 20},
+  {"rainbowcycle_gold", "Rainbow Cycle - Gold", 2, 16, 20},
+  {"rainbowcycle_neon", "Rainbow Cycle - Neon", 2, 17, 20},
+  {"rainbowcycle_candy", "Rainbow Cycle - Candy", 2, 18, 20},
+  {"rainbowcycle_mono", "Rainbow Cycle - Mono White", 2, 19, 20},
+  {"disco_rainbow", "Disco - Rainbow", 3, 0, 50},
+  {"disco_fire", "Disco - Fire", 3, 1, 50},
+  {"disco_ice", "Disco - Ice", 3, 2, 50},
+  {"disco_ocean", "Disco - Ocean", 3, 3, 50},
+  {"disco_forest", "Disco - Forest", 3, 4, 50},
+  {"disco_sunset", "Disco - Sunset", 3, 5, 50},
+  {"disco_party", "Disco - Party", 3, 6, 50},
+  {"disco_red", "Disco - Red", 3, 7, 50},
+  {"disco_green", "Disco - Green", 3, 8, 50},
+  {"disco_blue", "Disco - Blue", 3, 9, 50},
+  {"disco_purple", "Disco - Purple", 3, 10, 50},
+  {"disco_warmwhite", "Disco - Warm White", 3, 11, 50},
+  {"disco_coolwhite", "Disco - Cool White", 3, 12, 50},
+  {"disco_pastel", "Disco - Pastel", 3, 13, 50},
+  {"disco_redblue", "Disco - Red-Blue", 3, 14, 50},
+  {"disco_pinkcyan", "Disco - Pink-Cyan", 3, 15, 50},
+  {"disco_gold", "Disco - Gold", 3, 16, 50},
+  {"disco_neon", "Disco - Neon", 3, 17, 50},
+  {"disco_candy", "Disco - Candy", 3, 18, 50},
+  {"disco_mono", "Disco - Mono White", 3, 19, 50},
+  {"confetti_rainbow", "Confetti - Rainbow", 4, 0, 30},
+  {"confetti_fire", "Confetti - Fire", 4, 1, 30},
+  {"confetti_ice", "Confetti - Ice", 4, 2, 30},
+  {"confetti_ocean", "Confetti - Ocean", 4, 3, 30},
+  {"confetti_forest", "Confetti - Forest", 4, 4, 30},
+  {"confetti_sunset", "Confetti - Sunset", 4, 5, 30},
+  {"confetti_party", "Confetti - Party", 4, 6, 30},
+  {"confetti_red", "Confetti - Red", 4, 7, 30},
+  {"confetti_green", "Confetti - Green", 4, 8, 30},
+  {"confetti_blue", "Confetti - Blue", 4, 9, 30},
+  {"confetti_purple", "Confetti - Purple", 4, 10, 30},
+  {"confetti_warmwhite", "Confetti - Warm White", 4, 11, 30},
+  {"confetti_coolwhite", "Confetti - Cool White", 4, 12, 30},
+  {"confetti_pastel", "Confetti - Pastel", 4, 13, 30},
+  {"confetti_redblue", "Confetti - Red-Blue", 4, 14, 30},
+  {"confetti_pinkcyan", "Confetti - Pink-Cyan", 4, 15, 30},
+  {"confetti_gold", "Confetti - Gold", 4, 16, 30},
+  {"confetti_neon", "Confetti - Neon", 4, 17, 30},
+  {"confetti_candy", "Confetti - Candy", 4, 18, 30},
+};
+const int NUM_LED_MODES = sizeof(LED_MODES) / sizeof(LED_MODES[0]);
+
+
+int findLedModeIndex(const String& id) {
+  for (int i = 0; i < NUM_LED_MODES; i++) {
+    if (id == LED_MODES[i].id) return i;
+  }
+  return -1;
+}
+
+String buildLedModesJson() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (int i = 0; i < NUM_LED_MODES; i++) {
+    JsonObject o = arr.add<JsonObject>();
+    o["id"] = LED_MODES[i].id;
+    o["label"] = LED_MODES[i].label;
+  }
+  String out;
+  serializeJson(doc, out);
+  return out;
+}
+
 String ledMode = "off";
-String lastLedEffect = "running";
+String lastLedEffect = "rainbowrun_rainbow";
+int currentLedModeIdx = 0;   // index into LED_MODES
+int8_t currentEngine = -1;
+int8_t currentPalette = 0;
+uint16_t currentSpeedMs = 30;
+
 unsigned long lastLedStep = 0;
-uint16_t rainbowStep = 0;
-int bouncePos = 0;
-int bounceDir = 1;
+uint16_t animStep = 0;         // posisi animasi berjalan (rainbowrun/rainbowcycle)
+uint8_t confettiFade[NUM_LEDS]; // brightness tiap pixel buat efek confetti fade-out
 
 #define PIN_ONBOARD_LED 8
 #define BOOT_BTN_PIN 9
@@ -180,6 +388,23 @@ float current = 0;
 float chargerwatt = 0;
 bool pgood = 0;
 bool ch224aReady = false;
+// Status PD dalam bentuk teks yang dikonsumsi app buat nentuin label &
+// warna indikator (PD_NEGOTIATED/PD_WAITING/REQUEST_FAILED/CH224A_NOT_READY).
+// PENTING: field ini WAJIB ikut dikirim di buildStatusJson() — sebelumnya
+// bug-nya persis di sini, app baca "pdStatus" tapi firmware gak pernah
+// ngirim field itu, jadi teksnya nyangkut permanen di default app
+// ("CH224A_NOT_READY" / "CH224A OFFLINE") walau ch224aReady sudah true.
+String pdStatus = "CH224A_NOT_READY";
+
+void updatePdStatus() {
+  if (!ch224aReady) {
+    pdStatus = "CH224A_NOT_READY";
+  } else if (pgood) {
+    pdStatus = "PD_NEGOTIATED";
+  } else {
+    pdStatus = "PD_WAITING";
+  }
+}
 
 String netMode;
 String savedSsid;
@@ -302,24 +527,32 @@ uint32_t wheelColor(byte pos) {
 }
 
 void applyLedMode(String mode) {
-  if (mode != "off" && mode != "static" && mode != "running" &&
-      mode != "disco" && mode != "bounce") return;
+  int idx = findLedModeIndex(mode);
+  if (idx < 0) return; // id tidak dikenal, abaikan
+
+  currentLedModeIdx = idx;
   ledMode = mode;
+  currentEngine = LED_MODES[idx].engine;
+  currentPalette = LED_MODES[idx].palette;
+  currentSpeedMs = LED_MODES[idx].speedMs;
   if (mode != "off") lastLedEffect = mode;
 
-  if (mode == "off") {
+  animStep = 0;
+  lastLedStep = 0;
+  memset(confettiFade, 0, sizeof(confettiFade));
+
+  if (currentEngine == -1) { // off
     strip.clear();
     strip.show();
-  } else if (mode == "static") {
+  } else if (currentEngine == 0) { // static: isi sekali, gradien penuh di sepanjang strip
     for (int i = 0; i < NUM_LEDS; i++) {
       int hue = (i * 256 / NUM_LEDS) & 255;
-      strip.setPixelColor(i, wheelColor(hue));
+      strip.setPixelColor(i, paletteColor(currentPalette, hue));
     }
     strip.show();
-  } else if (mode == "bounce") {
-    bouncePos = 0;
-    bounceDir = 1;
   }
+  // engine 1 (rainbowrun), 2 (rainbowcycle), 3 (disco), 4 (confetti) itu
+  // animasi terus-menerus, digambar tiap frame di handleLedAnimation().
 
   if (prefs.getString("ledMode", "") != ledMode) {
     prefs.putString("ledMode", ledMode);
@@ -327,42 +560,52 @@ void applyLedMode(String mode) {
 }
 
 void handleLedAnimation() {
-  if (ledMode == "running") {
-    if (millis() - lastLedStep < 20) return;
-    lastLedStep = millis();
-    for (int i = 0; i < NUM_LEDS; i++) {
-      int hue = ((i * 256 / NUM_LEDS) + rainbowStep) & 255;
-      strip.setPixelColor(i, wheelColor(hue));
-    }
-    strip.show();
-    rainbowStep += 3;
-    if (rainbowStep >= 256) rainbowStep = 0;
-  } else if (ledMode == "disco") {
-    if (millis() - lastLedStep < 120) return;
-    lastLedStep = millis();
-    for (int i = 0; i < NUM_LEDS; i++) {
-      strip.setPixelColor(i, strip.Color(random(0, 256), random(0, 256), random(0, 256)));
-    }
-    strip.show();
-  } else if (ledMode == "bounce") {
-    if (millis() - lastLedStep < 30) return;
-    lastLedStep = millis();
-    strip.clear();
-    const int tailLen = 4;
-    for (int t = 0; t < tailLen; t++) {
-      int pos = bouncePos - (bounceDir * t);
-      if (pos >= 0 && pos < NUM_LEDS) {
-        int fade = 255 - (t * (255 / tailLen));
-        uint32_t c = wheelColor((bouncePos * 8) & 255);
-        uint8_t r = (uint8_t)(((c >> 16) & 0xFF) * fade / 255);
-        uint8_t g = (uint8_t)(((c >> 8) & 0xFF) * fade / 255);
-        uint8_t b = (uint8_t)((c & 0xFF) * fade / 255);
-        strip.setPixelColor(pos, strip.Color(r, g, b));
+  if (currentEngine < 1) return; // off & static gak butuh redraw tiap frame
+  if (millis() - lastLedStep < currentSpeedMs) return;
+  lastLedStep = millis();
+
+  switch (currentEngine) {
+    case 1: { // Rainbow Run — gradien palet bergerak menyusuri strip
+      for (int i = 0; i < NUM_LEDS; i++) {
+        int hue = ((i * 256 / NUM_LEDS) + animStep) & 255;
+        strip.setPixelColor(i, paletteColor(currentPalette, hue));
       }
+      strip.show();
+      animStep = (animStep + 3) & 255;
+      break;
     }
-    strip.show();
-    bouncePos += bounceDir;
-    if (bouncePos >= NUM_LEDS - 1 || bouncePos <= 0) bounceDir = -bounceDir;
+    case 2: { // Rainbow Cycle — seluruh strip 1 warna, warnanya geser pelan
+      uint32_t c = paletteColor(currentPalette, animStep & 255);
+      for (int i = 0; i < NUM_LEDS; i++) strip.setPixelColor(i, c);
+      strip.show();
+      animStep = (animStep + 2) & 255;
+      break;
+    }
+    case 3: { // Disco — tiap pixel dapat warna acak dari palet
+      for (int i = 0; i < NUM_LEDS; i++) {
+        strip.setPixelColor(i, paletteColor(currentPalette, random(0, 256)));
+      }
+      strip.show();
+      break;
+    }
+    case 4: { // Confetti — kilau acak dari palet, fade out perlahan
+      for (int i = 0; i < NUM_LEDS; i++) {
+        confettiFade[i] = (confettiFade[i] > 12) ? confettiFade[i] - 12 : 0;
+      }
+      if (random(0, 10) < 6) {
+        int p = random(0, NUM_LEDS);
+        confettiFade[p] = 255;
+      }
+      for (int i = 0; i < NUM_LEDS; i++) {
+        uint32_t c = paletteColor(currentPalette, (i * 40) & 255);
+        uint8_t r = ((c >> 16) & 0xFF) * confettiFade[i] / 255;
+        uint8_t g = ((c >> 8) & 0xFF) * confettiFade[i] / 255;
+        uint8_t b = (c & 0xFF) * confettiFade[i] / 255;
+        strip.setPixelColor(i, strip.Color(r, g, b));
+      }
+      strip.show();
+      break;
+    }
   }
 }
 
@@ -379,6 +622,7 @@ String buildStatusJson(bool includeSecret) {
   doc["chargerWatt"] = chargerwatt;
   doc["powerGood"] = pgood;
   doc["ch224aReady"] = ch224aReady;
+  doc["pdStatus"] = pdStatus;
   doc["fanSpeed"] = fanSpeedPercent;
   doc["fanRpm"] = fanRpm;
   doc["netMode"] = netMode;
@@ -718,6 +962,11 @@ void handleStatusHttp() {
   server.send(200, "application/json", buildStatusJson(configApActive));
 }
 
+void handleLedModesHttp() {
+  lastAppContact = millis();
+  server.send(200, "application/json", buildLedModesJson());
+}
+
 void handleSetCmd() {
   if (!checkHttpAuth()) return;
   lastAppContact = millis();
@@ -746,6 +995,7 @@ void registerHttpHandlers() {
   server.on("/scanwifi", HTTP_GET, handleScanWifi);
   server.on("/setwifi", HTTP_POST, handleSetWifi);
   server.on("/status", HTTP_GET, handleStatusHttp);
+  server.on("/ledmodes", HTTP_GET, handleLedModesHttp);
   server.on("/set", HTTP_POST, handleSetCmd);
   server.on("/switch_ble", HTTP_POST, handleSwitchBle);
 }
@@ -896,6 +1146,7 @@ void setup() {
     Serial.println(ch224Addr, HEX);
     applyVoltage(savedVoltage);
   }
+  updatePdStatus();
 
   strip.begin();
   strip.setBrightness(80);
@@ -981,6 +1232,7 @@ void loop() {
       pgood = CH224X1->isPowerGood();
       current = CH224X1->getCurrentProfile() / 1000.0;
       chargerwatt = current * currentSetVoltage;
+      updatePdStatus();
       Serial.print("Maximum current : ");
       Serial.print(current, 0);
       Serial.println(" A)");
@@ -998,6 +1250,7 @@ void loop() {
       Serial.println("CH224A terdeteksi.");
       CH224X1->setVoltage(0);
     }
+    updatePdStatus();
   }
 
   if (millis() - lastPublish > 300) {
