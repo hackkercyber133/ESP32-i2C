@@ -1,4 +1,3 @@
-//VLADIMIR PUTIN//
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
@@ -17,6 +16,7 @@ Preferences prefs;
 String deviceId;
 String bleName;
 bool deviceConnected = false;
+bool authPassSentThisSession = false; // dipakai publishStatusBLE(), direset tiap konek baru
 
 String computeDeviceId() {
   uint64_t mac = ESP.getEfuseMac();
@@ -79,11 +79,8 @@ void scanI2CBus() {
 #define NUM_LEDS 30
 Adafruit_NeoPixel strip(NUM_LEDS, PIN_LED_DATA, NEO_GRB + NEO_KHZ800);
 
-uint32_t wheelColor(byte pos); // forward declare, dipakai paletteColor() di bawah
+uint32_t wheelColor(byte pos);
 
-// Setiap palet = daftar warna (hex 0xRRGGBB). paletteColor() interpolasi
-// mulus di antara warna² ini, siklus balik ke awal (dipakai animasi jalan).
-// Palet index 0 (rainbow) dikecualikan - pakai wheelColor() (spektrum penuh).
 const uint32_t PALETTE_FIRE[]      = {0xFF0000, 0xFF4500, 0xFFA500, 0xFFFF00};
 const uint32_t PALETTE_ICE[]       = {0x001133, 0x0066CC, 0x66CCFF, 0xFFFFFF};
 const uint32_t PALETTE_OCEAN[]     = {0x001F3F, 0x0074D9, 0x39CCCC, 0x7FDBFF};
@@ -105,34 +102,29 @@ const uint32_t PALETTE_CANDY[]     = {0xFF69B4, 0xFFB6C1, 0xFFFFFF};
 const uint32_t PALETTE_MONO[]      = {0xFFFFFF};
 
 struct PaletteInfo { const uint32_t* colors; uint8_t count; };
-// Urutan HARUS sama persis dengan urutan palet di generator mode (lihat
-// gen_modes.py) — index 0 = rainbow (ditangani khusus lewat wheelColor()).
 const PaletteInfo PALETTES[] = {
-  { nullptr,             0 }, // 0 rainbow (khusus, pakai wheelColor)
-  { PALETTE_FIRE,        4 }, // 1
-  { PALETTE_ICE,         4 }, // 2
-  { PALETTE_OCEAN,       4 }, // 3
-  { PALETTE_FOREST,      4 }, // 4
-  { PALETTE_SUNSET,      4 }, // 5
-  { PALETTE_PARTY,       6 }, // 6
-  { PALETTE_RED,         2 }, // 7
-  { PALETTE_GREEN,       2 }, // 8
-  { PALETTE_BLUE,        2 }, // 9
-  { PALETTE_PURPLE,      3 }, // 10
-  { PALETTE_WARMWHITE,   3 }, // 11
-  { PALETTE_COOLWHITE,   3 }, // 12
-  { PALETTE_PASTEL,      4 }, // 13
-  { PALETTE_REDBLUE,     2 }, // 14
-  { PALETTE_PINKCYAN,    2 }, // 15
-  { PALETTE_GOLD,        2 }, // 16
-  { PALETTE_NEON,        4 }, // 17
-  { PALETTE_CANDY,       3 }, // 18
-  { PALETTE_MONO,        1 }, // 19
+  { nullptr,             0 },
+  { PALETTE_FIRE,        4 },
+  { PALETTE_ICE,         4 },
+  { PALETTE_OCEAN,       4 },
+  { PALETTE_FOREST,      4 },
+  { PALETTE_SUNSET,      4 },
+  { PALETTE_PARTY,       6 },
+  { PALETTE_RED,         2 },
+  { PALETTE_GREEN,       2 },
+  { PALETTE_BLUE,        2 },
+  { PALETTE_PURPLE,      3 },
+  { PALETTE_WARMWHITE,   3 },
+  { PALETTE_COOLWHITE,   3 },
+  { PALETTE_PASTEL,      4 },
+  { PALETTE_REDBLUE,     2 },
+  { PALETTE_PINKCYAN,    2 },
+  { PALETTE_GOLD,        2 },
+  { PALETTE_NEON,        4 },
+  { PALETTE_CANDY,       3 },
+  { PALETTE_MONO,        1 },
 };
 
-// Ambil warna di posisi 0-255 dalam sebuah palet, blend mulus antar stop
-// warna dan siklus balik ke stop pertama di ujungnya (cocok buat animasi
-// berjalan/rotasi). paletteIdx 0 = rainbow penuh (delegasi ke wheelColor).
 uint32_t paletteColor(int paletteIdx, uint8_t pos) {
   if (paletteIdx <= 0 || paletteIdx >= (int)(sizeof(PALETTES) / sizeof(PALETTES[0]))) {
     return wheelColor(pos);
@@ -261,7 +253,6 @@ const LedModeInfo LED_MODES[] = {
 };
 const int NUM_LED_MODES = sizeof(LED_MODES) / sizeof(LED_MODES[0]);
 
-
 int findLedModeIndex(const String& id) {
   for (int i = 0; i < NUM_LED_MODES; i++) {
     if (id == LED_MODES[i].id) return i;
@@ -284,14 +275,14 @@ String buildLedModesJson() {
 
 String ledMode = "off";
 String lastLedEffect = "rainbowrun_rainbow";
-int currentLedModeIdx = 0;   // index into LED_MODES
+int currentLedModeIdx = 0;
 int8_t currentEngine = -1;
 int8_t currentPalette = 0;
 uint16_t currentSpeedMs = 30;
 
 unsigned long lastLedStep = 0;
-uint16_t animStep = 0;         // posisi animasi berjalan (rainbowrun/rainbowcycle)
-uint8_t confettiFade[NUM_LEDS]; // brightness tiap pixel buat efek confetti fade-out
+uint16_t animStep = 0;
+uint8_t confettiFade[NUM_LEDS];
 
 #define PIN_ONBOARD_LED 8
 #define BOOT_BTN_PIN 9
@@ -388,12 +379,6 @@ float current = 0;
 float chargerwatt = 0;
 bool pgood = 0;
 bool ch224aReady = false;
-// Status PD dalam bentuk teks yang dikonsumsi app buat nentuin label &
-// warna indikator (PD_NEGOTIATED/PD_WAITING/REQUEST_FAILED/CH224A_NOT_READY).
-// PENTING: field ini WAJIB ikut dikirim di buildStatusJson() — sebelumnya
-// bug-nya persis di sini, app baca "pdStatus" tapi firmware gak pernah
-// ngirim field itu, jadi teksnya nyangkut permanen di default app
-// ("CH224A_NOT_READY" / "CH224A OFFLINE") walau ch224aReady sudah true.
 String pdStatus = "CH224A_NOT_READY";
 
 void updatePdStatus() {
@@ -461,6 +446,7 @@ volatile uint16_t bleCommandLen = 0;
 class MyServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
     deviceConnected = true;
+    authPassSentThisSession = false;
     Serial.println("BLE: Terhubung ke App!");
   }
 
@@ -528,7 +514,7 @@ uint32_t wheelColor(byte pos) {
 
 void applyLedMode(String mode) {
   int idx = findLedModeIndex(mode);
-  if (idx < 0) return; // id tidak dikenal, abaikan
+  if (idx < 0) return;
 
   currentLedModeIdx = idx;
   ledMode = mode;
@@ -541,18 +527,16 @@ void applyLedMode(String mode) {
   lastLedStep = 0;
   memset(confettiFade, 0, sizeof(confettiFade));
 
-  if (currentEngine == -1) { // off
+  if (currentEngine == -1) {
     strip.clear();
     strip.show();
-  } else if (currentEngine == 0) { // static: isi sekali, gradien penuh di sepanjang strip
+  } else if (currentEngine == 0) {
     for (int i = 0; i < NUM_LEDS; i++) {
       int hue = (i * 256 / NUM_LEDS) & 255;
       strip.setPixelColor(i, paletteColor(currentPalette, hue));
     }
     strip.show();
   }
-  // engine 1 (rainbowrun), 2 (rainbowcycle), 3 (disco), 4 (confetti) itu
-  // animasi terus-menerus, digambar tiap frame di handleLedAnimation().
 
   if (prefs.getString("ledMode", "") != ledMode) {
     prefs.putString("ledMode", ledMode);
@@ -560,12 +544,12 @@ void applyLedMode(String mode) {
 }
 
 void handleLedAnimation() {
-  if (currentEngine < 1) return; // off & static gak butuh redraw tiap frame
+  if (currentEngine < 1) return;
   if (millis() - lastLedStep < currentSpeedMs) return;
   lastLedStep = millis();
 
   switch (currentEngine) {
-    case 1: { // Rainbow Run — gradien palet bergerak menyusuri strip
+    case 1: {
       for (int i = 0; i < NUM_LEDS; i++) {
         int hue = ((i * 256 / NUM_LEDS) + animStep) & 255;
         strip.setPixelColor(i, paletteColor(currentPalette, hue));
@@ -574,21 +558,21 @@ void handleLedAnimation() {
       animStep = (animStep + 3) & 255;
       break;
     }
-    case 2: { // Rainbow Cycle — seluruh strip 1 warna, warnanya geser pelan
+    case 2: {
       uint32_t c = paletteColor(currentPalette, animStep & 255);
       for (int i = 0; i < NUM_LEDS; i++) strip.setPixelColor(i, c);
       strip.show();
       animStep = (animStep + 2) & 255;
       break;
     }
-    case 3: { // Disco — tiap pixel dapat warna acak dari palet
+    case 3: {
       for (int i = 0; i < NUM_LEDS; i++) {
         strip.setPixelColor(i, paletteColor(currentPalette, random(0, 256)));
       }
       strip.show();
       break;
     }
-    case 4: { // Confetti — kilau acak dari palet, fade out perlahan
+    case 4: {
       for (int i = 0; i < NUM_LEDS; i++) {
         confettiFade[i] = (confettiFade[i] > 12) ? confettiFade[i] - 12 : 0;
       }
@@ -639,11 +623,44 @@ String buildStatusJson(bool includeSecret) {
   return jsonStr;
 }
 
+// BLE GATT notify TIDAK otomatis dipotong-sambung kalau datanya lebih
+// panjang dari MTU (beda sama operasi "read", yang memang auto-reassembly).
+// JSON status ini sudah lumayan panjang (pdStatus, fanRpm, netMode,
+// wifiConnected, httpAuthPass, dll) - kalau dikirim mentah lewat satu kali
+// notify() dan lebih panjang dari (MTU-3) byte, sisanya kepotong diam-diam
+// dan hasilnya JSON rusak di sisi app (gagal di-parse, SEMUA field jadi
+// gak keupdate - persis gejala "macet di 5V, PD gak kebaca").
+//
+// Solusinya: pecah jadi beberapa notify kecil, masing-masing diawali 2
+// byte header (index chunk, total chunk), app yang nyambung ulang. Ini
+// jauh lebih aman daripada cuma ngirit field, karena JSON pasti bakal
+// nambah panjang lagi ke depannya kalau ada fitur baru.
+#define BLE_CHUNK_SIZE 180
+
 void publishStatusBLE() {
-  if (deviceConnected && pCharacteristic != nullptr) {
-    String jsonStr = buildStatusJson(true);
-    pCharacteristic->setValue(jsonStr);
+  if (!deviceConnected || pCharacteristic == nullptr) return;
+
+  // httpAuthPass cuma perlu dikirim SEKALI per sesi koneksi (app nyimpen
+  // begitu dapat), bukan tiap 300ms selamanya - itu buang-buang bandwidth
+  // BLE yang udah pas-pasan buat field lain.
+  String jsonStr = buildStatusJson(!authPassSentThisSession);
+  if (!authPassSentThisSession) authPassSentThisSession = true;
+
+  size_t total = jsonStr.length();
+  size_t numChunks = (total + BLE_CHUNK_SIZE - 1) / BLE_CHUNK_SIZE;
+  if (numChunks == 0) numChunks = 1;
+  if (numChunks > 255) numChunks = 255; // batas 1 byte di header, JSON segini panjang seharusnya gak kejadian
+
+  for (size_t i = 0; i < numChunks; i++) {
+    size_t start = i * BLE_CHUNK_SIZE;
+    size_t len = min((size_t)BLE_CHUNK_SIZE, total - start);
+    uint8_t packet[BLE_CHUNK_SIZE + 2];
+    packet[0] = (uint8_t)i;
+    packet[1] = (uint8_t)numChunks;
+    memcpy(packet + 2, jsonStr.c_str() + start, len);
+    pCharacteristic->setValue(packet, len + 2);
     pCharacteristic->notify();
+    if (numChunks > 1) delay(15); // kasih jeda kecil antar potongan biar gak ketimpa/ke-drop stack BLE-nya
   }
 }
 
@@ -1032,7 +1049,7 @@ void startWifiControlMode(const String& ssid, const String& pass) {
   }
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\nSUKSES: WiFi tersambung, IP: " + WiFi.localIP().toString());
-    WiFi.setSleep(false); // matikan modem-sleep — sering jadi penyebab WiFi ESP32 putus sendiri
+    WiFi.setSleep(false);
     server.begin();
     udp.begin(UDP_BEACON_PORT);
     wifiControlActive = true;
@@ -1206,7 +1223,7 @@ void loop() {
         wifiDownSince = millis();
         Serial.println("WiFi terputus, mencoba reconnect...");
         WiFi.reconnect();
-      } else if (millis() - wifiDownSince > 20000) {        
+      } else if (millis() - wifiDownSince > 20000) {
         Serial.println("WiFi tidak pulih dalam 20 detik, kembali ke mode Bluetooth...");
         prefs.putString("netMode", "ble");
         delay(300);
