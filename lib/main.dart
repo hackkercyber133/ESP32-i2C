@@ -513,8 +513,8 @@ class _ControllerPageState extends State<ControllerPage> {
   double chargerWatt = 0.0; // watt maksimum charger, dari field "chargerWatt" firmware
   int fanSpeed = 100; // persentase PWM fan (0-100), dari field "fanSpeed" firmware
   int fanRpm = 0; // RPM aktual fan, dari field "fanRpm" firmware (hasil baca tachometer)
-  String ledMode = "off"; // "off" | "static" | "running" | "disco" | "bounce"
-  String lastLedEffect = "running"; // efek terakhir dipilih, dipakai saat tombol ON
+  String ledMode = "off"; // id dari ledModeList (100 mode, lihat definisi di bawah)
+  String lastLedEffect = "rainbowrun_rainbow"; // efek terakhir dipilih, dipakai saat tombol ON
   String uptime = "00:00:00";
   String status = "🔴 Offline";
   bool ch224aReady = false;
@@ -2331,31 +2331,200 @@ class _ControllerPageState extends State<ControllerPage> {
     ]),
   );
 
-  Widget _nexusRgbCard(bool isDark) => _nexusCard(isDark, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-    _nexusSectionTitle(isDark, 'RGB ENGINE', 'Efek LED dari firmware ESP32'),
-    const SizedBox(height: 12),
-    Row(children: [
-      _rgbButton(isDark, 'OFF', 'off', Icons.power_settings_new_rounded),
-      _rgbButton(isDark, 'STATIC', 'static', Icons.circle),
-      _rgbButton(isDark, 'RUN', 'running', Icons.motion_photos_on_rounded),
-      _rgbButton(isDark, 'DISCO', 'disco', Icons.celebration_rounded),
-      _rgbButton(isDark, 'BOUNCE', 'bounce', Icons.swap_horiz_rounded),
-    ]),
-  ]));
+  static const List<Map<String, String>> ledModeList = [
+    {'id': 'off', 'label': 'Off'},
+    {'id': 'static_rainbow', 'label': 'Static - Rainbow'},
+    {'id': 'static_fire', 'label': 'Static - Fire'},
+    {'id': 'static_ice', 'label': 'Static - Ice'},
+    {'id': 'static_ocean', 'label': 'Static - Ocean'},
+    {'id': 'static_forest', 'label': 'Static - Forest'},
+    {'id': 'static_sunset', 'label': 'Static - Sunset'},
+    {'id': 'static_party', 'label': 'Static - Party'},
+    {'id': 'static_red', 'label': 'Static - Red'},
+    {'id': 'static_green', 'label': 'Static - Green'},
+    {'id': 'static_blue', 'label': 'Static - Blue'},
+    {'id': 'static_purple', 'label': 'Static - Purple'},
+    {'id': 'static_warmwhite', 'label': 'Static - Warm White'},
+    {'id': 'static_coolwhite', 'label': 'Static - Cool White'},
+    {'id': 'static_pastel', 'label': 'Static - Pastel'},
+    {'id': 'static_redblue', 'label': 'Static - Red-Blue'},
+    {'id': 'static_pinkcyan', 'label': 'Static - Pink-Cyan'},
+    {'id': 'static_gold', 'label': 'Static - Gold'},
+    {'id': 'static_neon', 'label': 'Static - Neon'},
+    {'id': 'static_candy', 'label': 'Static - Candy'},
+    {'id': 'static_mono', 'label': 'Static - Mono White'},
+    {'id': 'rainbowrun_rainbow', 'label': 'Rainbow Run - Rainbow'},
+    {'id': 'rainbowrun_fire', 'label': 'Rainbow Run - Fire'},
+    {'id': 'rainbowrun_ice', 'label': 'Rainbow Run - Ice'},
+    {'id': 'rainbowrun_ocean', 'label': 'Rainbow Run - Ocean'},
+    {'id': 'rainbowrun_forest', 'label': 'Rainbow Run - Forest'},
+    {'id': 'rainbowrun_sunset', 'label': 'Rainbow Run - Sunset'},
+    {'id': 'rainbowrun_party', 'label': 'Rainbow Run - Party'},
+    {'id': 'rainbowrun_red', 'label': 'Rainbow Run - Red'},
+    {'id': 'rainbowrun_green', 'label': 'Rainbow Run - Green'},
+    {'id': 'rainbowrun_blue', 'label': 'Rainbow Run - Blue'},
+    {'id': 'rainbowrun_purple', 'label': 'Rainbow Run - Purple'},
+    {'id': 'rainbowrun_warmwhite', 'label': 'Rainbow Run - Warm White'},
+    {'id': 'rainbowrun_coolwhite', 'label': 'Rainbow Run - Cool White'},
+    {'id': 'rainbowrun_pastel', 'label': 'Rainbow Run - Pastel'},
+    {'id': 'rainbowrun_redblue', 'label': 'Rainbow Run - Red-Blue'},
+    {'id': 'rainbowrun_pinkcyan', 'label': 'Rainbow Run - Pink-Cyan'},
+    {'id': 'rainbowrun_gold', 'label': 'Rainbow Run - Gold'},
+    {'id': 'rainbowrun_neon', 'label': 'Rainbow Run - Neon'},
+    {'id': 'rainbowrun_candy', 'label': 'Rainbow Run - Candy'},
+    {'id': 'rainbowrun_mono', 'label': 'Rainbow Run - Mono White'},
+    {'id': 'rainbowcycle_rainbow', 'label': 'Rainbow Cycle - Rainbow'},
+    {'id': 'rainbowcycle_fire', 'label': 'Rainbow Cycle - Fire'},
+    {'id': 'rainbowcycle_ice', 'label': 'Rainbow Cycle - Ice'},
+    {'id': 'rainbowcycle_ocean', 'label': 'Rainbow Cycle - Ocean'},
+    {'id': 'rainbowcycle_forest', 'label': 'Rainbow Cycle - Forest'},
+    {'id': 'rainbowcycle_sunset', 'label': 'Rainbow Cycle - Sunset'},
+    {'id': 'rainbowcycle_party', 'label': 'Rainbow Cycle - Party'},
+    {'id': 'rainbowcycle_red', 'label': 'Rainbow Cycle - Red'},
+    {'id': 'rainbowcycle_green', 'label': 'Rainbow Cycle - Green'},
+    {'id': 'rainbowcycle_blue', 'label': 'Rainbow Cycle - Blue'},
+    {'id': 'rainbowcycle_purple', 'label': 'Rainbow Cycle - Purple'},
+    {'id': 'rainbowcycle_warmwhite', 'label': 'Rainbow Cycle - Warm White'},
+    {'id': 'rainbowcycle_coolwhite', 'label': 'Rainbow Cycle - Cool White'},
+    {'id': 'rainbowcycle_pastel', 'label': 'Rainbow Cycle - Pastel'},
+    {'id': 'rainbowcycle_redblue', 'label': 'Rainbow Cycle - Red-Blue'},
+    {'id': 'rainbowcycle_pinkcyan', 'label': 'Rainbow Cycle - Pink-Cyan'},
+    {'id': 'rainbowcycle_gold', 'label': 'Rainbow Cycle - Gold'},
+    {'id': 'rainbowcycle_neon', 'label': 'Rainbow Cycle - Neon'},
+    {'id': 'rainbowcycle_candy', 'label': 'Rainbow Cycle - Candy'},
+    {'id': 'rainbowcycle_mono', 'label': 'Rainbow Cycle - Mono White'},
+    {'id': 'disco_rainbow', 'label': 'Disco - Rainbow'},
+    {'id': 'disco_fire', 'label': 'Disco - Fire'},
+    {'id': 'disco_ice', 'label': 'Disco - Ice'},
+    {'id': 'disco_ocean', 'label': 'Disco - Ocean'},
+    {'id': 'disco_forest', 'label': 'Disco - Forest'},
+    {'id': 'disco_sunset', 'label': 'Disco - Sunset'},
+    {'id': 'disco_party', 'label': 'Disco - Party'},
+    {'id': 'disco_red', 'label': 'Disco - Red'},
+    {'id': 'disco_green', 'label': 'Disco - Green'},
+    {'id': 'disco_blue', 'label': 'Disco - Blue'},
+    {'id': 'disco_purple', 'label': 'Disco - Purple'},
+    {'id': 'disco_warmwhite', 'label': 'Disco - Warm White'},
+    {'id': 'disco_coolwhite', 'label': 'Disco - Cool White'},
+    {'id': 'disco_pastel', 'label': 'Disco - Pastel'},
+    {'id': 'disco_redblue', 'label': 'Disco - Red-Blue'},
+    {'id': 'disco_pinkcyan', 'label': 'Disco - Pink-Cyan'},
+    {'id': 'disco_gold', 'label': 'Disco - Gold'},
+    {'id': 'disco_neon', 'label': 'Disco - Neon'},
+    {'id': 'disco_candy', 'label': 'Disco - Candy'},
+    {'id': 'disco_mono', 'label': 'Disco - Mono White'},
+    {'id': 'confetti_rainbow', 'label': 'Confetti - Rainbow'},
+    {'id': 'confetti_fire', 'label': 'Confetti - Fire'},
+    {'id': 'confetti_ice', 'label': 'Confetti - Ice'},
+    {'id': 'confetti_ocean', 'label': 'Confetti - Ocean'},
+    {'id': 'confetti_forest', 'label': 'Confetti - Forest'},
+    {'id': 'confetti_sunset', 'label': 'Confetti - Sunset'},
+    {'id': 'confetti_party', 'label': 'Confetti - Party'},
+    {'id': 'confetti_red', 'label': 'Confetti - Red'},
+    {'id': 'confetti_green', 'label': 'Confetti - Green'},
+    {'id': 'confetti_blue', 'label': 'Confetti - Blue'},
+    {'id': 'confetti_purple', 'label': 'Confetti - Purple'},
+    {'id': 'confetti_warmwhite', 'label': 'Confetti - Warm White'},
+    {'id': 'confetti_coolwhite', 'label': 'Confetti - Cool White'},
+    {'id': 'confetti_pastel', 'label': 'Confetti - Pastel'},
+    {'id': 'confetti_redblue', 'label': 'Confetti - Red-Blue'},
+    {'id': 'confetti_pinkcyan', 'label': 'Confetti - Pink-Cyan'},
+    {'id': 'confetti_gold', 'label': 'Confetti - Gold'},
+    {'id': 'confetti_neon', 'label': 'Confetti - Neon'},
+    {'id': 'confetti_candy', 'label': 'Confetti - Candy'},
+  ];
 
-  Widget _rgbButton(bool isDark, String label, String mode, IconData icon) {
-    final selected = ledMode == mode;
-    return Expanded(child: _TapScale(
-      onTap: () => sendLed(mode),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeOutCubic,
-        margin: const EdgeInsets.symmetric(horizontal: 2), padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 2),
-        decoration: BoxDecoration(color: selected ? accentColor.withOpacity(.16) : AppColors.card(isDark), borderRadius: BorderRadius.circular(12), border: Border.all(color: selected ? accentColor : Colors.transparent)),
-        child: Column(children: [Icon(icon, color: selected ? accentColor : AppColors.textFaint(isDark), size: 16), const SizedBox(height: 4), Text(label, style: TextStyle(color: selected ? accentColor : AppColors.textFaint(isDark), fontSize: 7, fontWeight: FontWeight.w900))]),
+  Widget _nexusRgbCard(bool isDark) {
+    final current = ledModeList.firstWhere(
+      (m) => m['id'] == ledMode,
+      orElse: () => {'id': ledMode, 'label': ledMode},
+    );
+    return _nexusCard(isDark, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      _nexusSectionTitle(isDark, 'RGB ENGINE', '${ledModeList.length} mode LED tersedia'),
+      const SizedBox(height: 12),
+      _TapScale(
+        onTap: () => _openLedModeMenu(isDark),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 14),
+          decoration: BoxDecoration(
+            color: accentColor.withOpacity(.10),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: accentColor.withOpacity(.35)),
+          ),
+          child: Row(children: [
+            Icon(Icons.auto_awesome_rounded, color: accentColor, size: 18),
+            const SizedBox(width: 10),
+            Expanded(child: Text(current['label'] ?? ledMode,
+              style: TextStyle(color: AppColors.text(isDark), fontSize: 13, fontWeight: FontWeight.w800))),
+            Icon(Icons.list_rounded, color: accentColor, size: 18),
+          ]),
+        ),
       ),
-    ));
+    ]));
   }
+
+  // Bottom sheet berisi search + list scroll semua mode (mirip menu efek
+  // WLED) — tap satu item langsung kirim ke firmware lewat sendLed().
+  void _openLedModeMenu(bool isDark) {
+    String query = '';
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.card(isDark),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        return StatefulBuilder(builder: (ctx, setSheetState) {
+          final filtered = ledModeList.where((m) =>
+            m['label']!.toLowerCase().contains(query.toLowerCase())).toList();
+          return SizedBox(
+            height: MediaQuery.of(ctx).size.height * 0.75,
+            child: Column(children: [
+              const SizedBox(height: 12),
+              Container(width: 40, height: 4, decoration: BoxDecoration(color: AppColors.textFaint(isDark), borderRadius: BorderRadius.circular(4))),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+                child: TextField(
+                  onChanged: (v) => setSheetState(() => query = v),
+                  style: TextStyle(color: AppColors.text(isDark)),
+                  decoration: InputDecoration(
+                    hintText: 'Cari mode LED...',
+                    hintStyle: TextStyle(color: AppColors.textFaint(isDark)),
+                    prefixIcon: Icon(Icons.search_rounded, color: AppColors.textFaint(isDark)),
+                    filled: true,
+                    fillColor: accentColor.withOpacity(.06),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  itemCount: filtered.length,
+                  itemBuilder: (ctx, i) {
+                    final m = filtered[i];
+                    final selected = ledMode == m['id'];
+                    return ListTile(
+                      dense: true,
+                      leading: Icon(selected ? Icons.radio_button_checked_rounded : Icons.radio_button_unchecked_rounded,
+                        color: selected ? accentColor : AppColors.textFaint(isDark), size: 20),
+                      title: Text(m['label']!, style: TextStyle(
+                        color: selected ? accentColor : AppColors.text(isDark),
+                        fontWeight: selected ? FontWeight.w800 : FontWeight.w500, fontSize: 13)),
+                      onTap: () {
+                        sendLed(m['id']!);
+                        Navigator.pop(ctx);
+                      },
+                    );
+                  },
+                ),
+              ),
+            ]),
+          );
+        });
+      },
+    );
+  }
+
 
   Widget _nexusQuickMenu(bool isDark) => Row(children: [
     _quickTile(isDark, Icons.analytics_rounded, 'DATA', () {
