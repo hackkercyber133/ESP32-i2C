@@ -10,6 +10,7 @@
 #include <Wire.h>
 #include <esp_random.h>
 #include <CH224X_I2C.h>
+#include <time.h>
 
 Preferences prefs;
 
@@ -440,7 +441,18 @@ NimBLEServer* pServer = nullptr;
 NimBLECharacteristic* pCharacteristic = nullptr;
 volatile bool bleWritePending = false;
 portMUX_TYPE bleMux = portMUX_INITIALIZER_UNLOCKED;
-char bleCommandBuf[129] = {0};
+
+// Perintah masuk (termasuk daftar jadwal, yang bisa jauh lebih panjang dari satu
+// paket BLE) dipecah app jadi beberapa write, masing-masing diawali header 2 byte
+// [chunkIndex, totalChunks] - sama seperti pola yang sudah dipakai di publishStatusBLE()
+// untuk arah sebaliknya. Di sini kita sambung ulang sebelum di-parse sebagai JSON.
+#define BLE_RX_BUFFER_SIZE 3072
+char bleRxAssembly[BLE_RX_BUFFER_SIZE];
+uint16_t bleRxAssemblyLen = 0;
+uint8_t bleRxExpectedTotal = 0;
+uint8_t bleRxReceivedCount = 0;
+
+char bleCommandBuf[BLE_RX_BUFFER_SIZE] = {0};
 volatile uint16_t bleCommandLen = 0;
 
 class MyServerCallbacks : public NimBLEServerCallbacks {
@@ -468,16 +480,43 @@ class MyServerCallbacks : public NimBLEServerCallbacks {
 class MyCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connInfo) override {
     std::string value = characteristic->getValue();
-    if (!value.empty()) {
-      size_t n = value.size();
-      if (n > sizeof(bleCommandBuf) - 1) n = sizeof(bleCommandBuf) - 1;
-      portENTER_CRITICAL(&bleMux);
-      memcpy(bleCommandBuf, value.data(), n);
-      bleCommandBuf[n] = '\0';
-      bleCommandLen = (uint16_t)n;
-      bleWritePending = true;
-      portEXIT_CRITICAL(&bleMux);
+    if (value.size() < 2) return; // minimal harus ada header 2 byte [chunkIndex, totalChunks]
+    uint8_t idx = (uint8_t)value[0];
+    uint8_t total = (uint8_t)value[1];
+    if (total == 0) total = 1;
+    size_t payloadLen = value.size() - 2;
+
+    portENTER_CRITICAL(&bleMux);
+    if (idx == 0) {
+      bleRxAssemblyLen = 0;
+      bleRxExpectedTotal = total;
+      bleRxReceivedCount = 0;
     }
+    if (idx != bleRxReceivedCount || total != bleRxExpectedTotal) {
+      // Paket keselip / urutan tidak nyambung - buang, tunggu paket index 0 berikutnya
+      // daripada nekat sambung JSON yang pasti rusak.
+      bleRxAssemblyLen = 0;
+      bleRxExpectedTotal = 0;
+      bleRxReceivedCount = 0;
+      portEXIT_CRITICAL(&bleMux);
+      return;
+    }
+    if (bleRxAssemblyLen + payloadLen < BLE_RX_BUFFER_SIZE) {
+      memcpy(bleRxAssembly + bleRxAssemblyLen, value.data() + 2, payloadLen);
+      bleRxAssemblyLen += payloadLen;
+    }
+    bleRxReceivedCount++;
+    if (bleRxReceivedCount >= bleRxExpectedTotal) {
+      size_t finalLen = min((size_t)bleRxAssemblyLen, (size_t)BLE_RX_BUFFER_SIZE - 1);
+      memcpy(bleCommandBuf, bleRxAssembly, finalLen);
+      bleCommandBuf[finalLen] = '\0';
+      bleCommandLen = (uint16_t)finalLen;
+      bleWritePending = true;
+      bleRxAssemblyLen = 0;
+      bleRxExpectedTotal = 0;
+      bleRxReceivedCount = 0;
+    }
+    portEXIT_CRITICAL(&bleMux);
   }
 };
 
@@ -664,6 +703,159 @@ void publishStatusBLE() {
   }
 }
 
+// ================= JADWAL OTOMATIS (tersimpan & JALAN MANDIRI di ESP32) =================
+// Sebelumnya jadwal cuma disimpan & dieksekusi di sisi APLIKASI (timer 30 detik di
+// main.dart) - begitu app ditutup / BLE-WiFi terputus, jadwal berhenti total karena
+// tidak ada yang mengirim perintah voltase lagi. Sekarang jadwal disimpan di NVS
+// (flash) ESP32 dan dicek sendiri tiap menit terlepas dari status koneksi ke app.
+//
+// Sumber waktu:
+//  - Mode WiFi: NTP (perlu internet di jaringan rumah), otomatis re-sync tiap kali
+//    ESP32 konek WiFi - termasuk otomatis setelah restart / mati lampu.
+//  - Mode Bluetooth: TIDAK ada internet sama sekali, jadi ESP32 tidak bisa tahu jam
+//    sekarang sendirian. App WAJIB mengirim jam HP (perintah "setTime") minimal
+//    sekali setelah tiap kali ESP32 nyala/restart - dilakukan otomatis oleh app
+//    begitu BLE konek. Selama ESP32 tetap menyala (tidak restart/mati listrik)
+//    setelah itu, jadwal tetap jalan sendiri walau BLE diputus / app ditutup, karena
+//    jam internal ESP32 terus berjalan lepas dari koneksi.
+#define MAX_SCHEDULES 40
+struct ScheduleRule {
+  String id;
+  float voltage;
+  uint8_t hour;
+  uint8_t minute;
+  uint8_t daysMask;       // bit0=Senin ... bit6=Minggu, cocok dgn DateTime.weekday Dart (1=Senin..7=Minggu)
+  bool enabled;
+  int16_t lastFiredYday;  // hari-dalam-tahun (0-365) terakhir jadwal ini jalan, -1 = belum pernah
+};
+ScheduleRule schedules[MAX_SCHEDULES];
+int scheduleCount = 0;
+
+int dartWeekdayFromTm(int tm_wday) { // tm_wday: 0=Minggu..6=Sabtu -> dart: 1=Senin..7=Minggu
+  return (tm_wday == 0) ? 7 : tm_wday;
+}
+
+void setupNtpTime() {
+  // WIB = UTC+7, tanpa DST. Beberapa server dicoba biar cepat dapat salah satu.
+  configTzTime("WIB-7", "pool.ntp.org", "time.google.com", "id.pool.ntp.org");
+  Serial.println("Sinkronisasi waktu NTP dimulai (WIB, UTC+7)...");
+}
+
+void saveSchedulesToPrefs() {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (int i = 0; i < scheduleCount; i++) {
+    JsonObject o = arr.add<JsonObject>();
+    o["id"] = schedules[i].id;
+    o["voltage"] = schedules[i].voltage;
+    o["hour"] = schedules[i].hour;
+    o["minute"] = schedules[i].minute;
+    o["daysMask"] = schedules[i].daysMask;
+    o["enabled"] = schedules[i].enabled;
+    o["lastFiredYday"] = schedules[i].lastFiredYday;
+  }
+  String out;
+  serializeJson(doc, out);
+  prefs.putString("schedules", out);
+}
+
+void loadSchedulesFromPrefs() {
+  String raw = prefs.getString("schedules", "[]");
+  JsonDocument doc;
+  if (deserializeJson(doc, raw)) { scheduleCount = 0; return; }
+  scheduleCount = 0;
+  for (JsonObject o : doc.as<JsonArray>()) {
+    if (scheduleCount >= MAX_SCHEDULES) break;
+    ScheduleRule& r = schedules[scheduleCount];
+    r.id = o["id"] | "";
+    r.voltage = o["voltage"] | 5.0;
+    r.hour = o["hour"] | 0;
+    r.minute = o["minute"] | 0;
+    r.daysMask = o["daysMask"] | 0;
+    r.enabled = o["enabled"] | true;
+    r.lastFiredYday = o["lastFiredYday"] | -1;
+    scheduleCount++;
+  }
+  Serial.print("Jadwal otomatis dimuat dari NVS: ");
+  Serial.print(scheduleCount);
+  Serial.println(" aturan.");
+}
+
+// Dipanggil saat app mengirim perintah {"schedules":[{"id","hour","minute","voltage","days":[1..7],"enabled"}...]}
+// Mengganti seluruh daftar jadwal (full replace, sama seperti cara app menyimpan
+// jadwal di HP) dan langsung menyimpannya ke NVS supaya tetap ada walau ESP32 restart.
+void applySchedulesFromJson(JsonArray arr) {
+  static ScheduleRule oldSchedules[MAX_SCHEDULES];
+  int oldCount = scheduleCount;
+  for (int i = 0; i < oldCount; i++) oldSchedules[i] = schedules[i];
+
+  scheduleCount = 0;
+  for (JsonObject o : arr) {
+    if (scheduleCount >= MAX_SCHEDULES) break;
+    ScheduleRule r;
+    r.id = o["id"] | String(scheduleCount);
+    r.voltage = o["voltage"] | 5.0;
+    r.hour = o["hour"] | 0;
+    r.minute = o["minute"] | 0;
+    r.enabled = o["enabled"] | true;
+    r.daysMask = 0;
+    if (o["days"].is<JsonArray>()) {
+      for (JsonVariant d : o["days"].as<JsonArray>()) {
+        int dv = d.as<int>();
+        if (dv >= 1 && dv <= 7) r.daysMask |= (1 << (dv - 1));
+      }
+    }
+    // Kalau id-nya sama dengan jadwal lama (user cuma edit, bukan bikin baru),
+    // pertahankan lastFiredYday supaya tidak nembak dobel di hari yang sama.
+    r.lastFiredYday = -1;
+    for (int j = 0; j < oldCount; j++) {
+      if (oldSchedules[j].id == r.id) { r.lastFiredYday = oldSchedules[j].lastFiredYday; break; }
+    }
+    schedules[scheduleCount] = r;
+    scheduleCount++;
+  }
+  saveSchedulesToPrefs();
+  Serial.print("Jadwal otomatis diperbarui dari app: ");
+  Serial.print(scheduleCount);
+  Serial.println(" aturan tersimpan ke NVS.");
+}
+
+// Dicek tiap loop(), tapi cuma benar-benar mengevaluasi jadwal sekali per menit
+// (dicocokkan lewat jam:menit real, bukan lewat interval millis() - supaya tidak
+// meleset walau loop() jalan ratusan kali per detik).
+void checkSchedulesAutonomous() {
+  if (scheduleCount == 0) return;
+  time_t now = time(nullptr);
+  if (now < 1700000000) return; // waktu belum pernah disinkronkan (NTP/setTime) - jangan eksekusi apa pun
+  struct tm t;
+  localtime_r(&now, &t);
+
+  static int lastCheckedMinuteKey = -1;
+  int minuteKey = t.tm_hour * 60 + t.tm_min;
+  if (minuteKey == lastCheckedMinuteKey) return;
+  lastCheckedMinuteKey = minuteKey;
+
+  int weekdayDart = dartWeekdayFromTm(t.tm_wday);
+  bool changed = false;
+  for (int i = 0; i < scheduleCount; i++) {
+    ScheduleRule& r = schedules[i];
+    if (!r.enabled) continue;
+    if (!(r.daysMask & (1 << (weekdayDart - 1)))) continue;
+    if (r.hour != t.tm_hour || r.minute != t.tm_min) continue;
+    if (r.lastFiredYday == t.tm_yday) continue; // sudah jalan hari ini
+    r.lastFiredYday = t.tm_yday;
+    changed = true;
+    if (ch224aReady) {
+      applyVoltage(r.voltage);
+      triggerCmdBlink();
+      Serial.print("Jadwal otomatis terpicu MANDIRI (tanpa app terhubung) -> ");
+      Serial.print(r.voltage);
+      Serial.println("V");
+    }
+  }
+  if (changed) saveSchedulesToPrefs();
+}
+
 void processCommandJson(const String& cmd) {
   JsonDocument doc;
   if (deserializeJson(doc, cmd)) return;
@@ -678,6 +870,21 @@ void processCommandJson(const String& cmd) {
   if (doc["fanSpeed"].is<int>()) {
     setFanSpeed(doc["fanSpeed"]);
     triggerCmdBlink();
+  }
+  if (doc["schedules"].is<JsonArray>()) {
+    applySchedulesFromJson(doc["schedules"].as<JsonArray>());
+  }
+  if (!doc["setTime"].isNull()) {
+    // Epoch UTC (detik) dikirim app - dipakai terutama di mode Bluetooth karena
+    // tidak ada NTP sama sekali di sana. TZ WIB-7 yang menggeser ke waktu lokal.
+    long epoch = doc["setTime"].as<long>();
+    if (epoch > 1000000000L) {
+      struct timeval tv; tv.tv_sec = epoch; tv.tv_usec = 0;
+      settimeofday(&tv, NULL);
+      setenv("TZ", "WIB-7", 1);
+      tzset();
+      Serial.println("Waktu disinkronkan dari app (untuk jadwal otomatis).");
+    }
   }
 }
 
@@ -1007,6 +1214,22 @@ void handleSwitchBle() {
   ESP.restart();
 }
 
+// Body raw JSON: {"schedules":[{"id":"..","hour":22,"minute":0,"voltage":5,"days":[1,2,3,4,5,6,7],"enabled":true}, ...]}
+// Dipakai app untuk mendorong daftar jadwal terbaru ke ESP32 (mode WiFi) setiap
+// kali user tambah/edit/hapus jadwal, supaya tersimpan di NVS & dieksekusi mandiri.
+void handleSetSchedulesHttp() {
+  if (!checkHttpAuth()) return;
+  lastAppContact = millis();
+  processCommandJson(server.arg("plain"));
+  server.send(200, "application/json", "{\"result\":\"OK\"}");
+}
+
+void handleGetSchedulesHttp() {
+  if (!checkHttpAuth()) return;
+  lastAppContact = millis();
+  server.send(200, "application/json", prefs.getString("schedules", "[]"));
+}
+
 void registerHttpHandlers() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/scanwifi", HTTP_GET, handleScanWifi);
@@ -1015,6 +1238,8 @@ void registerHttpHandlers() {
   server.on("/ledmodes", HTTP_GET, handleLedModesHttp);
   server.on("/set", HTTP_POST, handleSetCmd);
   server.on("/switch_ble", HTTP_POST, handleSwitchBle);
+  server.on("/schedules", HTTP_POST, handleSetSchedulesHttp);
+  server.on("/schedules", HTTP_GET, handleGetSchedulesHttp);
 }
 
 void startConfigAP() {
@@ -1053,6 +1278,7 @@ void startWifiControlMode(const String& ssid, const String& pass) {
     server.begin();
     udp.begin(UDP_BEACON_PORT);
     wifiControlActive = true;
+    setupNtpTime(); // supaya jadwal otomatis punya sumber waktu yang akurat & mandiri, tanpa app
   } else {
     Serial.println("\nGAGAL: Tidak bisa konek WiFi dalam 15 detik, kembali ke mode Bluetooth...");
     prefs.putString("netMode", "ble");
@@ -1144,6 +1370,7 @@ void setup() {
   float savedVoltage = prefs.getFloat("voltage", 5.0);
   int savedFanSpeed = prefs.getInt("fanSpeed", 100);
   String savedLedMode = prefs.getString("ledMode", "off");
+  loadSchedulesFromPrefs(); // muat jadwal otomatis tersimpan - tetap ada walau habis restart/mati listrik
 
   pinMode(PIN_ONBOARD_LED, OUTPUT);
   onboardLedWrite(false);
@@ -1183,7 +1410,8 @@ void setup() {
 }
 
 void loop() {
-  char cmdBuf[129] = {0};
+  static char cmdBuf[BLE_RX_BUFFER_SIZE];
+  cmdBuf[0] = '\0';
   portENTER_CRITICAL(&bleMux);
 
   if (bleWritePending) {
@@ -1233,6 +1461,8 @@ void loop() {
       wifiDownSince = 0;
     }
   }
+
+  checkSchedulesAutonomous(); // jalan tiap loop, tapi cuma eksekusi 1x per menit - lepas dari status app
 
   handleStatusLed();
   handleLedAnimation();
