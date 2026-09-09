@@ -846,7 +846,17 @@ class _ControllerPageState extends State<ControllerPage> {
           await http.get(Uri.http(_wifiIp!, "/status")).timeout(Duration(seconds: 3));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        if (data['deviceId'] != null && data['deviceId'] != activeCooler?.id) return;
+        // Request ini point-to-point ke _wifiIp milik cooler ini (bukan broadcast),
+        // jadi tidak perlu filter deviceId di sini - filter itu dulu jadi penyebab
+        // status (voltase/PD) macet di nilai lama kalau deviceId sempat berubah
+        // (mis. setelah reflash firmware) walau device yang di-poll sudah benar.
+        // Kalau ID-nya memang berubah, sinkronkan supaya UDP discovery & history
+        // tetap konsisten ke depannya.
+        final reportedId = data['deviceId'];
+        if (reportedId is String && reportedId.isNotEmpty && activeCooler != null && activeCooler!.id != reportedId) {
+          activeCooler!.id = reportedId;
+          _savePairedCoolers();
+        }
         _consecutiveWifiPollFailures = 0;
         setState(() {
           status = "🟢 Online";
@@ -1016,11 +1026,17 @@ class _ControllerPageState extends State<ControllerPage> {
           connectionPriorityRequest: ConnectionPriority.high,
         );
       } catch (_) {}
-      // MTU lebih besar = command JSON muat sekali kirim, tanpa fragmentasi.
-      // Dinaikkan dari 185 ke 247 (maksimum yang didukung NimBLE default) —
-      // JSON status sekarang lebih panjang sejak ada field httpAuthPass.
+      // MTU lebih besar = notify status JSON muat sekali kirim, tanpa terpotong.
+      // CATATAN KOREKSI: 247 SEBELUMNYA DIKIRA batas maksimum NimBLE - itu
+      // keliru. Batas default NimBLE-Arduino sebenarnya 517 byte (batas spek
+      // BLE ATT_MTU). JSON status sekarang bisa tembus ~290+ byte (field
+      // pdStatus, fanSpeed, fanRpm, httpAuthPass, dst), padahal usable payload
+      // di MTU 247 cuma 244 byte (MTU - 3 byte header ATT) - jadi notify BLE
+      // (beda dari HTTP, tidak ada reassembly) kepotong di tengah, gagal
+      // di-decode app, dan app nyangkut di data lama selamanya. Naikkan ke
+      // 512 (margin aman di bawah batas 517) supaya selalu muat.
       try {
-        await device.requestMtu(247);
+        await device.requestMtu(512);
       } catch (_) {}
 
       setState(() {
@@ -1038,7 +1054,16 @@ class _ControllerPageState extends State<ControllerPage> {
               String payload = utf8.decode(value);
               try {
                 var data = jsonDecode(payload);
-                if (data['deviceId'] != null && data['deviceId'] != activeCooler?.id) return;
+                // Notify BLE ini datang dari koneksi GATT point-to-point ke device
+                // yang sedang connect - tidak perlu filter deviceId (dulu bikin
+                // status voltase/PD macet diam-diam kalau ID sempat tidak cocok).
+                // Sinkronkan activeCooler.id kalau ternyata beda, supaya UDP
+                // discovery WiFi tetap jalan benar setelah ini.
+                final reportedId = data['deviceId'];
+                if (reportedId is String && reportedId.isNotEmpty && activeCooler != null && activeCooler!.id != reportedId) {
+                  activeCooler!.id = reportedId;
+                  _savePairedCoolers();
+                }
                 setState(() {
                   _applyDeviceStatus(Map<String, dynamic>.from(data));
                 });
