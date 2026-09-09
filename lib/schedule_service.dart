@@ -3,14 +3,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// ===== JADWAL OTOMATIS =====
 /// Satu aturan = pada jam tertentu (di hari-hari tertentu dalam seminggu),
-/// otomatis kirim perintah ganti voltase ke cooler terkait.
+/// otomatis ganti voltase cooler terkait.
 ///
-/// CATATAN PENTING: eksekusi jadwal (pengiriman perintah MQTT/BLE ke
-/// hardware) hanya berjalan selama APLIKASI TERBUKA, karena mengirim
-/// perintah butuh koneksi WiFi/Bluetooth yang hidup di dalam app —
-/// bukan lewat server/cloud. Notifikasi lokal tetap muncul sesuai jadwal
-/// sebagai pengingat, tapi voltase baru benar-benar berubah kalau app
-/// aktif (foreground/background biasa) saat jadwal itu tiba.
+/// Eksekusi sebenarnya sekarang dilakukan MANDIRI oleh firmware ESP32 sendiri
+/// (disimpan di flash/NVS-nya), bukan oleh app lagi — supaya tetap jalan
+/// walau app ditutup atau BLE/WiFi ke ESP32 terputus. App di sini cuma jadi
+/// editor UI + pengirim salinan jadwal ke ESP32 setiap kali ada perubahan,
+/// lewat callback [onSaved] di bawah (didaftarkan oleh main.dart).
 class ScheduleRule {
   final String id;
   final String coolerId;
@@ -59,6 +58,13 @@ class ScheduleService {
   ScheduleService._();
   static const _prefKey = "auto_schedules";
 
+  /// Didaftarkan sekali oleh main.dart (yang punya akses koneksi BLE/WiFi ke
+  /// ESP32). Dipanggil otomatis setiap [saveAll] selesai, supaya SETIAP jalur
+  /// penyimpanan jadwal (tambah/edit/hapus/toggle/import) otomatis ikut
+  /// mendorong salinan terbaru ke ESP32 tanpa perlu dipanggil manual di
+  /// masing-masing tempat.
+  static Future<void> Function(List<ScheduleRule> all)? onSaved;
+
   static Future<List<ScheduleRule>> loadAll() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_prefKey);
@@ -74,5 +80,13 @@ class ScheduleService {
   static Future<void> saveAll(List<ScheduleRule> rules) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_prefKey, jsonEncode(rules.map((e) => e.toJson()).toList()));
+    if (onSaved != null) {
+      try {
+        await onSaved!(rules);
+      } catch (_) {
+        // Gagal kirim ke ESP32 (mis. lagi offline) tidak boleh menghalangi
+        // penyimpanan lokal - nanti disinkronkan lagi saat konek berikutnya.
+      }
+    }
   }
 }

@@ -4,9 +4,10 @@ import 'theme_controller.dart';
 
 /// ===== HALAMAN JADWAL OTOMATIS =====
 /// List aturan jadwal untuk cooler yang sedang aktif, bisa tambah/edit/
-/// hapus/aktif-nonaktifkan. Eksekusi sebenarnya (kirim perintah voltase)
-/// dilakukan di ControllerPage lewat timer berkala yang membaca data
-/// yang disimpan lewat halaman ini.
+/// hapus/aktif-nonaktifkan. Setiap perubahan disimpan lewat ScheduleService,
+/// yang otomatis mendorong salinannya ke ESP32 (lihat ScheduleService.onSaved,
+/// didaftarkan di main.dart) - eksekusi sebenarnya berjalan MANDIRI di firmware
+/// ESP32, bukan di app ini lagi.
 class SchedulePage extends StatefulWidget {
   final String coolerId;
   final Color accentColor;
@@ -102,7 +103,7 @@ class _SchedulePageState extends State<SchedulePage> {
                   child: Padding(
                     padding: const EdgeInsets.all(24),
                     child: Text(
-                      "Belum ada jadwal. Tambah jadwal supaya voltase ganti otomatis di jam tertentu (mis. jam 22:00 turun ke 5V).\n\nCatatan: jadwal berjalan selama app ini masih terbuka, karena perintah dikirim lewat koneksi WiFi/Bluetooth yang aktif di app.",
+                      "Belum ada jadwal. Tambah jadwal supaya voltase ganti otomatis di jam tertentu (mis. jam 22:00 turun ke 5V).\n\nJadwal tersimpan langsung di ESP32 dan tetap jalan walau aplikasi ini ditutup atau perangkat sedang tidak terhubung.",
                       textAlign: TextAlign.center,
                       style: TextStyle(color: AppColors.textFaint(isDark), fontSize: 13),
                     ),

@@ -565,9 +565,15 @@ class _ControllerPageState extends State<ControllerPage> {
     await _loadPairedCoolers();
     await _loadAccentColor();
     _schedules = await ScheduleService.loadAll();
+    // Setiap kali jadwal disimpan (tambah/edit/hapus/toggle/import) di mana
+    // pun di app, otomatis dorong salinan terbaru ke ESP32 supaya dia yang
+    // eksekusi mandiri - lihat ScheduleService.saveAll().
+    ScheduleService.onSaved = _syncSchedulesToDevice;
 
-    // Cek jadwal tiap 30 detik, cek status offline tiap 1 menit — cukup
-    // ringan tapi tetap responsif untuk kasus "jam 22:00 turun ke 5V".
+    // Jadwal sekarang dieksekusi MANDIRI oleh ESP32 (tersimpan di NVS-nya),
+    // jadi timer ini bukan lagi yang menjalankan perubahan voltase - cuma
+    // dipakai sebagai pengingat notifikasi lokal saat app kebetulan sedang
+    // dibuka. Cek status offline tetap tiap 1 menit.
     _scheduleTimer = Timer.periodic(const Duration(seconds: 30), (_) => _checkSchedules());
     _offlineCheckTimer = Timer.periodic(const Duration(minutes: 1), (_) => _checkOfflineNotification());
 
@@ -576,7 +582,11 @@ class _ControllerPageState extends State<ControllerPage> {
     }
   }
 
-  // ===== JADWAL OTOMATIS: dicek berkala, kirim perintah kalau waktunya cocok =====
+  // ===== JADWAL OTOMATIS: eksekusi sebenarnya sudah dilakukan MANDIRI oleh =====
+  // ===== ESP32 (lihat checkSchedulesAutonomous() di firmware). Fungsi ini  =====
+  // ===== cuma pengingat notifikasi lokal kalau app kebetulan sedang dibuka =====
+  // ===== saat jadwal itu tiba - TIDAK mengirim perintah voltase lagi, biar =====
+  // ===== tidak ada 2 sumber yang sama-sama mengeksekusi.                  =====
   void _checkSchedules() {
     if (activeCooler == null || _schedules.isEmpty) return;
     final now = DateTime.now();
@@ -589,7 +599,6 @@ class _ControllerPageState extends State<ControllerPage> {
       if (r.lastFiredDateKey == todayKey) continue; // sudah jalan hari ini
       r.lastFiredDateKey = todayKey;
       changed = true;
-      sendVoltage(r.voltage);
       NotificationService.show(
         id: r.id.hashCode,
         title: "Jadwal Otomatis",
@@ -597,6 +606,49 @@ class _ControllerPageState extends State<ControllerPage> {
       );
     }
     if (changed) ScheduleService.saveAll(_schedules);
+  }
+
+  // ===== Dorong seluruh jadwal cooler AKTIF ke ESP32 supaya tersimpan di =====
+  // ===== NVS-nya dan dieksekusi mandiri, lepas dari status koneksi app. =====
+  Future<void> _syncSchedulesToDevice(List<ScheduleRule> all) async {
+    if (activeCooler == null) return;
+    final forThisCooler = all.where((r) => r.coolerId == activeCooler!.id).toList();
+    final payload = {
+      "schedules": forThisCooler
+          .map((r) => {
+                "id": r.id,
+                "hour": r.hour,
+                "minute": r.minute,
+                "voltage": r.voltage,
+                "days": r.days,
+                "enabled": r.enabled,
+              })
+          .toList(),
+    };
+    if (connectionMode == "WiFi") {
+      if (_wifiIp == null) return;
+      try {
+        final headers = {...esp32AuthHeaders(activeCooler), "Content-Type": "application/json"};
+        await http
+            .post(Uri.http(_wifiIp!, "/schedules"), headers: headers, body: jsonEncode(payload))
+            .timeout(const Duration(seconds: 5));
+      } catch (_) {
+        // Device sedang tidak terjangkau - tidak apa, akan disinkronkan lagi
+        // saat konek berikutnya (dipanggil ulang dari connectLocalWifi/connectBLE).
+      }
+    } else {
+      if (!bleConnected) return;
+      await _writeControlBLE(payload);
+    }
+  }
+
+  // ===== Kirim jam HP saat ini ke ESP32 (mode Bluetooth) =====
+  // Mode Bluetooth tidak ada akses internet sama sekali di ESP32-nya, jadi dia
+  // tidak bisa tahu jam sekarang sendirian seperti mode WiFi (yang pakai NTP).
+  // Wajib dipanggil tiap kali BLE baru konek supaya jadwal otomatis tetap akurat.
+  Future<void> _pushTimeToDevice() async {
+    final epochSeconds = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+    await _writeControlBLE({"setTime": epochSeconds});
   }
 
   // ===== NOTIFIKASI COOLER OFFLINE =====
@@ -743,6 +795,8 @@ class _ControllerPageState extends State<ControllerPage> {
   }
 
   // ===== WIFI LOKAL (tanpa broker/internet, langsung HTTP+UDP ke ESP32 di 1 jaringan) =====
+  bool _wifiSchedulesSyncedThisSession = false;
+
   void connectLocalWifi() async {
     if (activeCooler == null) {
       _showSnack("⚠️ Pilih atau tambah cooler dulu");
@@ -751,6 +805,7 @@ class _ControllerPageState extends State<ControllerPage> {
     // Coba IP terakhir yang diketahui dulu (kalau ada) sambil menunggu beacon baru masuk.
     _wifiIp = activeCooler!.lastIp;
     _consecutiveWifiPollFailures = 0;
+    _wifiSchedulesSyncedThisSession = false;
     await _startUdpDiscovery();
     _wifiPollTimer?.cancel();
     _wifiPollTimer = Timer.periodic(Duration(seconds: 3), (_) => _pollWifiStatus());
@@ -914,6 +969,12 @@ class _ControllerPageState extends State<ControllerPage> {
         _wifiSetupSawOnline = true;
         if (activeCooler != null) {
           HistoryService.recordStatus(coolerId: activeCooler!.id, online: true, voltage: setVolt);
+        }
+        // ESP32 mode WiFi dapat waktu sendiri lewat NTP, jadi cukup dorong
+        // jadwal (bukan jam) - sekali saja per sesi koneksi, bukan tiap 3 detik.
+        if (!_wifiSchedulesSyncedThisSession) {
+          _wifiSchedulesSyncedThisSession = true;
+          _syncSchedulesToDevice(_schedules);
         }
       } else {
         _consecutiveWifiPollFailures++;
@@ -1099,6 +1160,11 @@ class _ControllerPageState extends State<ControllerPage> {
           }
         }
       }
+      // Mode Bluetooth tidak punya akses internet di ESP32-nya, jadi jam &
+      // jadwal WAJIB didorong ulang tiap kali baru konek supaya jadwal
+      // otomatis tetap akurat walau nanti BLE-nya diputus / app ditutup.
+      await _pushTimeToDevice();
+      await _syncSchedulesToDevice(_schedules);
     } catch (e) {
       setState(() {
         bleConnected = false;
@@ -1114,6 +1180,13 @@ class _ControllerPageState extends State<ControllerPage> {
   // Satu jalur write terpusat: pakai karakteristik yang sudah di-cache,
   // dan writeWithoutResponse kalau firmware mendukungnya (lebih cepat,
   // tidak menunggu ACK balik dari ESP32).
+  //
+  // Tiap paket diawali header 2 byte [chunkIndex, totalChunks] (sama seperti
+  // pola notify status dari ESP32, cuma arahnya dibalik) supaya payload yang
+  // lebih panjang dari MTU (mis. daftar jadwal otomatis) tidak kepotong diam-
+  // diam - firmware yang menyambung ulang sebelum di-parse sebagai JSON.
+  static const int _bleWriteChunkSize = 240; // aman di bawah MTU 247-3 byte
+
   Future<bool> _writeControlBLE(Map<String, dynamic> payload) async {
     if (!bleConnected || bleDevice == null) return false;
     var ch = _controlChar;
@@ -1129,8 +1202,17 @@ class _ControllerPageState extends State<ControllerPage> {
     }
     if (ch == null) return false;
     try {
+      final bytes = utf8.encode(jsonEncode(payload));
       final canWriteFast = ch.properties.writeWithoutResponse;
-      await ch.write(utf8.encode(jsonEncode(payload)), withoutResponse: canWriteFast);
+      final totalChunks = bytes.isEmpty ? 1 : ((bytes.length + _bleWriteChunkSize - 1) ~/ _bleWriteChunkSize).clamp(1, 255);
+      for (int i = 0; i < totalChunks; i++) {
+        final start = i * _bleWriteChunkSize;
+        final end = (start + _bleWriteChunkSize > bytes.length) ? bytes.length : start + _bleWriteChunkSize;
+        final chunk = bytes.sublist(start, end);
+        final packet = <int>[i, totalChunks, ...chunk];
+        await ch.write(packet, withoutResponse: canWriteFast);
+        if (totalChunks > 1) await Future.delayed(const Duration(milliseconds: 15));
+      }
       return true;
     } catch (e) {
       return false;
@@ -2580,7 +2662,9 @@ class _ControllerPageState extends State<ControllerPage> {
     }),
     _quickTile(isDark, Icons.schedule_rounded, 'SCHEDULE', () {
       if (activeCooler == null) return _showSnack('Pilih device dulu');
-      Navigator.push(context, MaterialPageRoute(builder: (_) => SchedulePage(coolerId: activeCooler!.id, accentColor: accentColor, availableVoltages: const [5,9,12,15])));
+      Navigator.push(context, MaterialPageRoute(builder: (_) => SchedulePage(coolerId: activeCooler!.id, accentColor: accentColor, availableVoltages: const [5,9,12,15]))).then((_) async {
+        _schedules = await ScheduleService.loadAll();
+      });
     }),
     _quickTile(isDark, Icons.palette_outlined, 'THEME', () => _showThemeSheet()),
   ]);
