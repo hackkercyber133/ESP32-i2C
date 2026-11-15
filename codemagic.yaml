@@ -154,6 +154,43 @@ workflows:
           dart run flutter_launcher_icons
           echo "--- Ikon launcher yang dihasilkan: ---"
           ls -la android/app/src/main/res/mipmap-xxxhdpi/ 2>/dev/null || true
+      - name: Matikan lint vital (workaround crash lint di url_launcher_android)
+        script: |
+          python3 - <<'PYEOF'
+          import os
+
+          app_path = "android/app/build.gradle.kts"
+          with open(app_path) as f:
+              app = f.read()
+          if "checkReleaseBuilds" not in app:
+              import re
+              app = re.sub(
+                  r'(android\s*\{)',
+                  r'\1\n    lint {\n        checkReleaseBuilds = false\n        abortOnError = false\n    }',
+                  app,
+                  count=1,
+              )
+              with open(app_path, "w") as f:
+                  f.write(app)
+
+          root_path = "android/build.gradle.kts"
+          snippet = (
+              '\nsubprojects {\n'
+              '    tasks.configureEach {\n'
+              '        if (name.startsWith("lintVital")) {\n'
+              '            enabled = false\n'
+              '        }\n'
+              '    }\n'
+              '}\n'
+          )
+          with open(root_path) as f:
+              root = f.read()
+          if 'startsWith("lintVital")' not in root:
+              with open(root_path, "a") as f:
+                  f.write(snippet)
+          PYEOF
+          echo "--- lint config sekarang: ---"
+          grep -n "checkReleaseBuilds\|lintVital" android/app/build.gradle.kts android/build.gradle.kts
       - name: Build APK (obfuscated + minified)
         script: |
           flutter build apk --release --obfuscate --split-debug-info=build/debug-info
